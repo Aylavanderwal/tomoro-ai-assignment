@@ -1,4 +1,4 @@
-import { useState, Fragment, useEffect } from 'react';
+import { useState, Fragment, useEffect, useRef, useCallback } from 'react';
 import {
   LayoutDashboard,
   Clock,
@@ -48,11 +48,110 @@ type Decision = {
 };
 
 const DECISION_TEMPLATES: Omit<Decision, 'id' | 'status' | 'pausedAt'>[] = [
-  { label: 'Merge duplicate profiles', pattern: 'Name + DOB + Loyalty ID match', records: 28450 },
-  { label: 'Backfill missing nationality', pattern: 'Confidence >85% from passport or booking', records: 12340 },
-  { label: 'Resolve loyalty point conflicts', pattern: 'Duplicate points across merged accounts', records: 4210 },
-  { label: 'Standardise legacy address formats', pattern: 'Pre-2020 records with non-standard country codes', records: 8920 },
-  { label: 'Unresolvable identity conflicts', pattern: 'Multiple source systems disagree on core identity', records: 1900 },
+  { label: 'Conflicting identity — no shared key', pattern: 'Same traveller detected across 3 source systems with no common field match', records: 8240 },
+  { label: 'Travel document nationality ambiguity', pattern: 'Document type conflicts with inferred nationality — policy decision required', records: 3400 },
+  { label: 'Minors with incomplete consent records', pattern: 'Passenger age inferred as under 16 — guardian and consent records incomplete or missing', records: 520 },
+];
+
+type SubPattern = {
+  records: number;
+  confidenceLabel: string;
+  confidenceColor: string;
+  confidenceBg: string;
+  signal: string;
+  action: string;
+  detail: string;
+  example: readonly [string, string];
+};
+
+const DECISION_SUB_PATTERNS: Record<string, SubPattern[]> = {
+  'Conflicting identity — no shared key': [
+    { records: 2840, confidenceLabel: '91%', confidenceColor: 'text-[#059669]', confidenceBg: 'bg-[#d1fae5]', signal: 'Name romanisation variant across PNR systems', action: 'Merge · standardise to passport-verified spelling', detail: 'The same traveller appears in Amadeus as "Mohammed Al-Rashidi" and in Sabre as "Mohammad Alrashidy" — a transliteration difference, not a different person. DOB and route history match exactly. The agent identified this as a romanisation variant using multilingual name normalisation; a deterministic rule would have rejected the match due to Levenshtein distance above threshold.', example: ['Amadeus: "Al-Rashidi, M"', 'Sabre: "Alrashidy, Mohammad"'] },
+    { records: 2190, confidenceLabel: '84%', confidenceColor: 'text-[#059669]', confidenceBg: 'bg-[#d1fae5]', signal: 'Overlapping flight routes + hotel redemption, no field match', action: 'Flag for human review · strong behavioural signal', detail: 'No individual field matches with confidence above 65%: names differ (first-name variant), DOBs differ by 2 years, email domains differ. However, the agent identified 4 overlapping LHR–DXB booking windows, the same hotel loyalty number across 3 stays, and a shared GDS device fingerprint. Reasoning across flight, hotel, and session data simultaneously is not expressible as a rule.', example: ['Field match: none ≥65%', 'Behavioural: 84% · flag for review'] },
+    { records: 1870, confidenceLabel: '76%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'CS note links orphaned PNR to loyalty profile via maiden name', action: 'Flag as likely same person · human confirmation required', detail: 'The agent read a free-text customer service note on the orphaned profile: "customer mentioned booking under maiden name before marriage — please link to current account." Candidate match has a matching DOB and phone number but a different surname. Understanding the intent of an unstructured note and applying it across a name change is not possible with rule-based deduplication.', example: ['CS note: "old account, maiden name"', 'Candidate: same DOB + phone → 76%'] },
+    { records: 1340, confidenceLabel: '72%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'Identity chain: A=B, B=C, but A≠C directly', action: 'Flag identity cluster · chain confidence below merge threshold', detail: 'PNR record A matches CRM record B at 88% (shared email + DOB). CRM record B matches loyalty record C at 91% (shared phone + address). However, PNR A and loyalty C share no direct field, making the chain confidence 72% — below the merge threshold. The agent surfaced this multi-hop inference; a rule engine cannot reason about transitive identity links across systems.', example: ['A↔B: 88%, B↔C: 91%', 'Chain A↔C: 72% · needs review'] },
+  ],
+  'Travel document nationality ambiguity': [
+    { records: 1240, confidenceLabel: '84%', confidenceColor: 'text-[#059669]', confidenceBg: 'bg-[#d1fae5]', signal: 'Stateless travel document + consistent booking origin', action: 'Infer nationality from 5-year booking history · flag for review', detail: 'The passenger holds a stateless travel document (Convention Travel Document), which carries no nationality field. The agent inferred likely nationality from 5 years of bookings consistently originating from the same country, combined with a billing address and loyalty registration address in the same country. A rule cannot process stateless documents — it has no nationality field to read.', example: ['Document: stateless (CTD)', 'Inferred: "DEU" from booking history → 84%'] },
+    { records: 980, confidenceLabel: '77%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: '2016 visa nationality conflicts with current booking data', action: 'Flag temporal conflict · which source takes precedence?', detail: 'A 2016 Schengen visa lists nationality as "MAR" (Morocco). However, booking data from 2021 onwards consistently shows UK origin, and a 2022 frequent flyer registration lists address in London. The agent flagged this temporal conflict: the 2016 document may reflect a prior status. A policy decision is needed on whether historical documents or current behavioural signals take precedence for nationality backfill.', example: ['2016 visa: nationality "MAR"', '2022 booking signal: "GBR" → conflict'] },
+    { records: 730, confidenceLabel: '71%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'CS note mentions dual nationality — which to record?', action: 'Flag for policy decision · dual nationality not supported in schema', detail: 'A customer service interaction note reads: "passenger clarified they hold both Irish and Canadian passports — either can be used for booking." The current schema supports a single nationality field. The agent detected this from free text and flagged it: the policy question is which nationality to record as primary, and whether a secondary nationality field should be created. Neither can be resolved by a rule.', example: ['CS note: "Irish and Canadian passports"', 'Schema: single nationality field → policy gap'] },
+    { records: 450, confidenceLabel: '68%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'Refugee travel document — different legal treatment than passport', action: 'Escalate to compliance · cannot auto-backfill', detail: 'The travel document on file is a 1951 Convention refugee travel document. Nationality in this document is legally distinct from the country of issuance and may carry data protection obligations that differ from a standard passport. The agent identified the document type from a scan and flagged it for compliance review — auto-backfill from this document type is not appropriate without legal guidance.', example: ['Document: refugee travel doc (1951)', 'Nationality field: requires compliance review'] },
+  ],
+  'Minors with incomplete consent records': [
+    { records: 184, confidenceLabel: '95%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'Loyalty account self-registered, DOB indicates passenger is under 16', action: 'Hold — transfer to verified guardian before any processing', detail: 'The loyalty account was created via the website self-registration flow, which does not verify age. The agent inferred the passenger is under 16 from the DOB on the linked booking. Under GDPR Article 8, accounts for under-16s require verifiable parental consent to be lawfully held. This account cannot be processed until a guardian is verified and consent is recorded.', example: ['Self-registered, DOB: 2012-04-03 (age 12)', 'Action: hold · require guardian verification'] },
+    { records: 142, confidenceLabel: '97%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'Child on booking with no adult contact linked', action: 'Cannot process — mandatory guardian contact is missing', detail: 'The booking includes a passenger whose DOB confirms they are under 16, but no adult contact record is linked. Aviation regulations require an adult point of contact for minors. Processing this record without a guardian link would violate the airline\'s duty-of-care policy and regulatory requirements. No automated fix is possible — a staff member must locate and attach the correct guardian contact.', example: ['Passenger DOB: 2013-08-17 (age 10)', 'No adult contact on record → cannot proceed'] },
+    { records: 118, confidenceLabel: '91%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'Guardian consent record present but expired — renewal needed', action: 'Flag for outreach — consent lapsed, cannot process until renewed', detail: 'A guardian consent record exists for this minor, but it was signed more than 2 years ago. The airline\'s data governance policy requires consent renewal every 24 months for minor records. The agent cannot renew consent automatically — this requires a direct outreach message to the guardian on file, who must re-confirm before the record can be processed.', example: ['Consent signed: 2021-11-02 (2+ years ago)', 'Action: send renewal request to guardian'] },
+    { records: 76, confidenceLabel: '72%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'DOB conflicts between booking and loyalty — age is ambiguous', action: 'Cannot proceed — age must be confirmed from a verified document', detail: 'The booking record and loyalty platform carry different dates of birth for this passenger. The two DOBs straddle the age-16 threshold: one indicates 15, the other 17. Whether this passenger is a minor cannot be determined from existing data. Processing as an adult when the passenger may be a minor is not permissible. A staff member must confirm the correct DOB from a verified travel document before any processing can occur.', example: ['Booking DOB: 2009-02-14 (age 15)', 'Loyalty DOB: 2007-02-14 (age 17) → ambiguous'] },
+  ],
+};
+
+const DECISION_OUTCOMES: Record<string, { headline: string; lines: { variant: 'applied' | 'flagged' | 'escalated'; text: string }[] }> = {
+  'Conflicting identity — no shared key': {
+    headline: '8,240 records processed — stream resumed',
+    lines: [
+      { variant: 'applied', text: '2,840 records merged · romanisation variants resolved to passport-verified spelling' },
+      { variant: 'flagged', text: '2,190 records queued for human review · strong behavioural signal but no field match' },
+      { variant: 'flagged', text: '1,870 records flagged as likely same person · maiden name change, awaiting staff confirmation' },
+      { variant: 'flagged', text: '1,340 records isolated · multi-hop identity chain confidence below merge threshold' },
+    ],
+  },
+  'Travel document nationality ambiguity': {
+    headline: '3,400 records processed — stream resumed',
+    lines: [
+      { variant: 'applied', text: '1,240 records: nationality inferred from booking history and address signals, flagged for review' },
+      { variant: 'flagged', text: '980 records: temporal conflict noted · 2016 visa vs. current booking origin, logged for decision' },
+      { variant: 'flagged', text: '730 records: dual nationality detected in CS notes · policy gap logged, no field written' },
+      { variant: 'escalated', text: '450 records: refugee travel documents escalated to compliance team, no auto-backfill' },
+    ],
+  },
+  'Minors with incomplete consent records': {
+    headline: '520 records isolated — escalated to data governance team',
+    lines: [
+      { variant: 'escalated', text: '184 records: hold placed · self-registered under-16 accounts, guardian verification required (GDPR Art. 8)' },
+      { variant: 'escalated', text: '142 records: cannot process · no adult contact linked, sent to airport operations team' },
+      { variant: 'escalated', text: '118 records: consent lapsed · outreach queued to guardian on file for renewal' },
+      { variant: 'escalated', text: '76 records: age ambiguous across systems · staff must confirm from verified travel document' },
+    ],
+  },
+};
+
+type LogEntry = {
+  id: string;
+  time: Date;
+  variant: 'start' | 'progress' | 'decision' | 'approve' | 'skip' | 'block' | 'resume' | 'complete' | 'stream' | 'error';
+  text: string;
+};
+
+const AUTO_CLEAN_RULES = [
+  {
+    label: 'Fix date formats',
+    records: 228467,
+    confidence: 99.1,
+    example: ['21-03-1985', '1985-03-21'] as [string, string],
+    detail: 'Normalises date strings to ISO 8601 across DOB, booking date, and document expiry fields. Handles 14 format variants detected in this dataset.',
+  },
+  {
+    label: 'Update loyalty tier to match loyalty platform',
+    records: 142340,
+    confidence: 98.7,
+    example: ['PMS: "Silver"', 'Loyalty platform: "Gold" → update PMS'] as [string, string],
+    detail: 'Overwrites the PMS loyalty tier with the authoritative value from the loyalty platform where the two systems conflict. Loyalty platform is the source of truth.',
+  },
+  {
+    label: 'Correct travel document field formatting',
+    records: 86127,
+    confidence: 99.8,
+    example: ['GBRGB123456', 'GBR GB123456'] as [string, string],
+    detail: 'Standardises document field spacing, character separators, and country code formatting to ICAO Doc 9303 standards.',
+  },
+] as const;
+
+type StreamDef = { id: string; label: string; description: string; records: number; decisionLabel: string | null; speed: number; };
+const STREAMS: StreamDef[] = [
+  { id: 'low-risk', label: 'Low-risk auto-cleanup', description: 'Format fixes, field defaults, deduplication at 99%+ confidence', records: 456000, decisionLabel: null, speed: 0.5 },
+  { id: 'identity-conflicts', label: 'Conflicting identity — no shared key', description: 'Cross-system identity resolution · 8,240 records', records: 8240, decisionLabel: 'Conflicting identity — no shared key', speed: 0.3 },
+  { id: 'nationality-ambiguity', label: 'Travel document nationality ambiguity', description: 'Document nationality policy · 3,400 records', records: 3400, decisionLabel: 'Travel document nationality ambiguity', speed: 0.3 },
+  { id: 'minor-consent', label: 'Minors with incomplete consent records', description: 'Minor data compliance · 520 records', records: 520, decisionLabel: 'Minors with incomplete consent records', speed: 0.3 },
 ];
 
 type Dataset = {
@@ -70,9 +169,10 @@ type Dataset = {
 export default function App() {
   const [selectedTab, setSelectedTab] = useState<string>('passengers');
   const [expandedDataset, setExpandedDataset] = useState<string | null>(null);
-  const [agentState, setAgentState] = useState<'proposed' | 'running' | 'paused' | 'failed' | 'completed'>('proposed');
-  const [progress, setProgress] = useState<number>(0);
-  const [pauseCount, setPauseCount] = useState<number>(0);
+  const [agentState, setAgentState] = useState<'proposed' | 'running' | 'blocked' | 'failed' | 'completed'>('proposed');
+  const [streamProgress, setStreamProgress] = useState<Record<string, number>>(
+    Object.fromEntries(STREAMS.map(s => [s.id, 0]))
+  );
   const [showToast, setShowToast] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<string>('');
   const [showResumeView, setShowResumeView] = useState<boolean>(false);
@@ -84,38 +184,78 @@ export default function App() {
   const [devMode, setDevMode] = useState<boolean>(false);
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [undoCountdown, setUndoCountdown] = useState<number | null>(null);
-  const [completedUpTo, setCompletedUpTo] = useState<number>(0);
   const [failedAtProgress, setFailedAtProgress] = useState<number>(0);
+  const [expandedRules, setExpandedRules] = useState<Set<number>>(new Set());
+  // Tracks which decision cards have their sub-patterns section expanded (closed by default)
+  const [expandedDecisionDetails, setExpandedDecisionDetails] = useState<Set<string>>(new Set());
+  // Tracks which individual sub-patterns are disabled (key: `${decisionId}-${index}`)
+  const [disabledSubPatterns, setDisabledSubPatterns] = useState<Set<string>>(new Set());
+  const toggleSubPattern = (key: string) => setDisabledSubPatterns(prev => {
+    const next = new Set(prev);
+    next.has(key) ? next.delete(key) : next.add(key);
+    return next;
+  });
+  // Adjust rules panel
+  const [showBlockedModal, setShowBlockedModal] = useState<boolean>(false);
+  const [showAdjustRules, setShowAdjustRules] = useState<boolean>(false);
+  const [disabledAutoRules, setDisabledAutoRules] = useState<Set<number>>(new Set());
+  const toggleAutoRule = (i: number) => setDisabledAutoRules(prev => {
+    const next = new Set(prev); next.has(i) ? next.delete(i) : next.add(i); return next;
+  });
+  const activeAutoRuleRecords = AUTO_CLEAN_RULES.reduce((sum, r, i) => disabledAutoRules.has(i) ? sum : sum + r.records, 0);
+
+  // Activity log — real events appended as demo progresses
+  const [activityLog, setActivityLog] = useState<LogEntry[]>([]);
+  const addLog = useCallback((entry: Omit<LogEntry, 'id' | 'time'>) => {
+    setActivityLog(prev => [{ ...entry, id: `log-${Date.now()}-${Math.random()}`, time: new Date() }, ...prev]);
+  }, []);
+  // Refs to detect transitions
+  const prevAgentStateRef = useRef<string>('proposed');
+  const prevDecisionsRef = useRef<Decision[]>([]);
+  const completedStreamsRef = useRef<Set<string>>(new Set());
+
+  const toggleDecisionDetail = (id: string) => setExpandedDecisionDetails(prev => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  // Request notification permission as soon as the agent starts running
+  useEffect(() => {
+    if (agentState === 'running' && 'Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  }, [agentState]);
 
   // Notification system - Three levels of user awareness
   useEffect(() => {
-    // Only trigger notifications when agent pauses for user input
-    if (agentState === 'paused') {
+    // Notify when agent is truly blocked (ran out of safe work)
+    if (agentState === 'blocked') {
       // LEVEL 1: In-product toast notification
-      // Shows immediately when agent pauses, auto-dismisses after 5s
-      // Clicking toast navigates to the paused dataset
-      setToastMessage('Agent paused — your input is needed to continue');
+      setToastMessage('Agent blocked — decisions needed to continue');
       setShowToast(true);
       setTimeout(() => setShowToast(false), 5000);
 
       // LEVEL 2: Tab title update for background awareness
-      // Updates browser tab to show "(1) Action required" when user is on another tab
-      // Helps user notice paused state without switching windows
-      document.title = '(1) Action required — Data remediation';
+      document.title = '⚠ Action required — Data remediation';
 
-      // LEVEL 3: Browser system notification (only for blocking decisions)
-      // Requires user to have granted notification permission
-      // Only triggered when agent truly cannot proceed without input
+      // LEVEL 3: Browser system notification
       if ('Notification' in window && Notification.permission === 'granted') {
-        new Notification('AI paused — approval needed to continue', {
-          body: 'Duplicate passenger profiles require your decision',
+        new Notification('AeroData — Agent blocked', {
+          body: 'All remaining records require your input before processing can resume.',
           icon: '/favicon.ico',
-          tag: 'ai-remediation', // Tag prevents duplicate notifications
+          tag: 'ai-remediation-blocked',
+          requireInteraction: true,
         });
       }
+
+      // LEVEL 4: Browser alert — for when the tab is in the background
+      setTimeout(() => {
+        window.alert('AeroData Agent — input required\n\nThe remediation agent is blocked and cannot continue without your input.\n\nReturn to the app to review the queued decisions.');
+      }, 100);
+    } else if (agentState === 'running' && pendingDecisions.length > 0) {
+      document.title = `(${pendingDecisions.length}) Decision${pendingDecisions.length > 1 ? 's' : ''} queued — Data remediation`;
     } else {
-      // Reset tab title when not paused
-      // No notifications for low-risk processing or completed states
       document.title = 'Passenger Data Operations';
     }
   }, [agentState]);
@@ -139,41 +279,134 @@ export default function App() {
   const resolvedDecisionCount = decisions.filter(d => d.status !== 'pending').length;
   const pendingDecisions = decisions.filter(d => d.status === 'pending');
   const currentPendingDecision = pendingDecisions[0] ?? null;
-  const isStruggling = agentState === 'paused' && pauseCount >= 4;
+  const isStruggling = agentState === 'blocked' && pendingDecisions.length >= 4;
 
-  // Auto-progress when agent is running
+  // Streams are "discovered" progressively — low-risk always visible, medium-risk only after their decision surfaces
+  const visibleStreams = STREAMS.filter(s =>
+    s.decisionLabel === null || decisions.some(d => d.label === s.decisionLabel)
+  );
+
+  // Derived overall progress — weighted by record count across discovered streams only
+  const totalStreamRecords = visibleStreams.reduce((sum, s) => sum + s.records, 0);
+  const progress = totalStreamRecords > 0
+    ? visibleStreams.reduce((sum, s) => sum + (streamProgress[s.id] / 100) * s.records, 0) / totalStreamRecords * 100
+    : 0;
+
+  // Per-stream progress helper
+  const getStreamStatus = (stream: StreamDef) => {
+    if (streamProgress[stream.id] >= 100) return 'completed' as const;
+    const isBlocked = stream.decisionLabel ? pendingDecisions.some(d => d.label === stream.decisionLabel) : false;
+    return isBlocked ? 'blocked' as const : 'running' as const;
+  };
+
+  // Auto-progress each stream independently — blocked streams freeze, others continue
   useEffect(() => {
-    if (agentState === 'running') {
-      const interval = setInterval(() => {
-        setProgress((prev) => {
-          // First run: pause at 65% to ask for decision
-          if (pauseCount === 0 && prev >= 65) {
-            clearInterval(interval);
-            setTimeout(() => {
-              setAgentState('paused');
-              setPauseCount(1);
-            }, 500);
-            return 65;
+    if (agentState !== 'running') return;
+    const pendingLabels = new Set(pendingDecisions.map(d => d.label));
+    const interval = setInterval(() => {
+      setStreamProgress(prev => {
+        const next = { ...prev };
+        for (const stream of STREAMS) {
+          const isBlocked = stream.decisionLabel ? pendingLabels.has(stream.decisionLabel) : false;
+          if (!isBlocked && next[stream.id] < 100) {
+            next[stream.id] = Math.min(100, next[stream.id] + stream.speed);
           }
-          // Second run: complete at 100%
-          if (pauseCount > 0 && prev >= 100) {
-            clearInterval(interval);
-            setTimeout(() => {
-              setAgentState('completed');
-            }, 500);
-            return 100;
-          }
-          // Simulate realistic progress - slow and steady
-          if (prev < 20) return prev + 0.5;
-          if (prev < 60) return prev + 0.3;
-          if (prev < 85) return prev + 0.2;
-          return prev + 0.1;
-        });
-      }, 2000); // Update every 2 seconds
+        }
+        return next;
+      });
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [agentState, pendingDecisions]);
 
-      return () => clearInterval(interval);
+  // Detect completion — all discovered streams at 100%
+  useEffect(() => {
+    if (agentState !== 'running') return;
+    const discovered = STREAMS.filter(s => s.decisionLabel === null || decisions.some(d => d.label === s.decisionLabel));
+    if (discovered.length > 0 && discovered.every(s => streamProgress[s.id] >= 100)) {
+      setTimeout(() => setAgentState('completed'), 500);
     }
-  }, [agentState, pauseCount]);
+  }, [streamProgress, agentState, decisions]);
+
+  // Detect full block — all discovered streams either blocked or complete, at least one blocked
+  useEffect(() => {
+    if (agentState !== 'running') return;
+    const pendingLabels = new Set(pendingDecisions.map(d => d.label));
+    const discovered = STREAMS.filter(s => s.decisionLabel === null || decisions.some(d => d.label === s.decisionLabel));
+    const allStalled = discovered.every(s => {
+      if (streamProgress[s.id] >= 100) return true;
+      if (s.decisionLabel && pendingLabels.has(s.decisionLabel)) return true;
+      return false;
+    });
+    const anyBlocked = discovered.some(s => s.decisionLabel && pendingLabels.has(s.decisionLabel) && streamProgress[s.id] < 100);
+    if (allStalled && anyBlocked) {
+      setAgentState('blocked');
+      setShowBlockedModal(true);
+    }
+  }, [streamProgress, agentState, pendingDecisions, decisions]);
+
+  // Auto-resume — when a decision is resolved, unblock the agent if any discovered stream can progress
+  useEffect(() => {
+    if (agentState !== 'blocked') return;
+    const pendingLabels = new Set(pendingDecisions.map(d => d.label));
+    const discovered = STREAMS.filter(s => s.decisionLabel === null || decisions.some(d => d.label === s.decisionLabel));
+    const anyCanProgress = discovered.some(s => {
+      if (streamProgress[s.id] >= 100) return false;
+      if (s.decisionLabel && pendingLabels.has(s.decisionLabel)) return false;
+      return true;
+    });
+    if (anyCanProgress) setAgentState('running');
+  }, [pendingDecisions, agentState, streamProgress, decisions]);
+
+  // Log agent state transitions
+  useEffect(() => {
+    const prev = prevAgentStateRef.current;
+    prevAgentStateRef.current = agentState;
+    if (prev === agentState) return;
+    if (prev === 'proposed' && agentState === 'running') {
+      addLog({ variant: 'start', text: `Agent started · 1.2M records queued · ${AUTO_CLEAN_RULES.filter((_, i) => !disabledAutoRules.has(i)).length} auto-clean rules active` });
+    } else if (agentState === 'blocked') {
+      addLog({ variant: 'block', text: 'Agent blocked · processed all safe work · waiting for decisions' });
+    } else if (prev === 'blocked' && agentState === 'running') {
+      addLog({ variant: 'resume', text: 'Agent resumed · unblocked stream now processing' });
+    } else if (agentState === 'completed') {
+      addLog({ variant: 'complete', text: 'Run complete · all records processed' });
+    } else if (agentState === 'failed') {
+      addLog({ variant: 'error', text: `Agent stopped — write conflict at ${Math.round(failedAtProgress)}% · safe to retry from checkpoint` });
+    }
+  }, [agentState]);
+
+  // Log new decisions discovered and status changes
+  useEffect(() => {
+    const prev = prevDecisionsRef.current;
+    // New decisions added
+    decisions.forEach(d => {
+      const wasPresent = prev.some(p => p.id === d.id);
+      if (!wasPresent) {
+        addLog({ variant: 'decision', text: `Pattern detected: "${d.label}" · ${d.records.toLocaleString()} records paused` });
+      }
+    });
+    // Status changes
+    decisions.forEach(d => {
+      const prevD = prev.find(p => p.id === d.id);
+      if (prevD && prevD.status === 'pending' && d.status === 'approved') {
+        addLog({ variant: 'approve', text: `Decision approved: "${d.label}" · ${d.records.toLocaleString()} records now processing` });
+      } else if (prevD && prevD.status === 'pending' && d.status === 'skipped') {
+        addLog({ variant: 'skip', text: `Decision skipped: "${d.label}" · ${d.records.toLocaleString()} records deferred` });
+      }
+    });
+    prevDecisionsRef.current = decisions;
+  }, [decisions]);
+
+  // Log stream completions
+  useEffect(() => {
+    if (agentState !== 'running') return;
+    STREAMS.forEach(s => {
+      if (streamProgress[s.id] >= 100 && !completedStreamsRef.current.has(s.id)) {
+        completedStreamsRef.current.add(s.id);
+        addLog({ variant: 'stream', text: `Stream complete: "${s.label}" · ${s.records.toLocaleString()} records processed` });
+      }
+    });
+  }, [streamProgress, agentState]);
 
   const datasetsByCategory: Record<string, Dataset[]> = {
     passengers: [
@@ -182,11 +415,11 @@ export default function App() {
         name: 'Passenger Master',
         domain: 'Customer',
         owner: 'Data Operations',
-        status: agentState === 'paused' ? 'Needs input' : agentState === 'running' ? 'Processing' : agentState === 'completed' ? 'Completed' : 'Needs attention',
+        status: agentState === 'blocked' ? 'Needs input' : agentState === 'running' ? 'Processing' : agentState === 'completed' ? 'Completed' : 'Needs attention',
         recordsImpacted: '1.2M',
         lastUpdated: '2 min ago',
-        statusColor: agentState === 'paused' ? 'text-[#d97706]' : agentState === 'running' ? 'text-[#2563eb]' : agentState === 'completed' ? 'text-[#059669]' : 'text-[#d97706]',
-        bgColor: agentState === 'paused' ? 'bg-[#fef3c7]' : agentState === 'running' ? 'bg-[#dbeafe]' : agentState === 'completed' ? 'bg-[#d1fae5]' : 'bg-[#fef3c7]',
+        statusColor: agentState === 'blocked' ? 'text-[#d97706]' : agentState === 'running' ? 'text-[#2563eb]' : agentState === 'completed' ? 'text-[#059669]' : 'text-[#d97706]',
+        bgColor: agentState === 'blocked' ? 'bg-[#fef3c7]' : agentState === 'running' ? 'bg-[#dbeafe]' : agentState === 'completed' ? 'bg-[#d1fae5]' : 'bg-[#fef3c7]',
       },
       {
         id: 'loyalty-profiles',
@@ -1038,35 +1271,97 @@ export default function App() {
         </div>
       )}
 
+      {/* Blocked modal — full overlay, fires on both blocks */}
+      {showBlockedModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-background rounded-xl border border-border shadow-2xl w-full max-w-sm mx-4 overflow-hidden animate-in zoom-in-95 duration-200">
+            {/* Header stripe */}
+            <div className="bg-[#d97706] px-5 py-3 flex items-center gap-3">
+              <div className="size-8 rounded-full bg-white/20 flex items-center justify-center shrink-0">
+                <Pause className="size-4 text-white" strokeWidth={2.5} />
+              </div>
+              <div>
+                <div className="text-[13px] font-semibold text-white">Agent requires your input</div>
+                <div className="text-[11px] text-white/70">AeroData · Passenger Master Record</div>
+              </div>
+            </div>
+            {/* Body */}
+            <div className="px-5 py-4">
+              <p className="text-[13px] text-foreground/80 leading-relaxed mb-4">
+                The remediation agent has processed all records it can handle automatically and is now blocked. It cannot continue until you review the queued decisions.
+              </p>
+              <div className="p-3 bg-[#fef3c7] rounded-lg border border-[#fde68a] mb-4">
+                <div className="text-[12px] font-medium text-[#92400e] mb-1">
+                  {pendingDecisions.length} decision{pendingDecisions.length !== 1 ? 's' : ''} waiting
+                </div>
+                <div className="text-[11px] text-[#78350f]">
+                  {pendingDecisions.map(d => d.label).join(' · ')}
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setShowBlockedModal(false);
+                  setExpandedDataset('passenger-master');
+                }}
+                className="w-full py-2.5 rounded-lg text-[13px] font-medium text-white"
+                style={{ background: 'linear-gradient(135deg, #d97706 0%, #b45309 100%)' }}
+              >
+                Review decisions →
+              </button>
+              <button
+                onClick={() => setShowBlockedModal(false)}
+                className="w-full mt-2 py-2 text-[12px] text-foreground/50 hover:text-foreground/70"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Test panel — fixed bottom-right, outside the product UI */}
-      {agentState === 'running' && (
-        <div className="fixed bottom-4 right-4 z-50 w-64 rounded-lg border border-dashed border-[#94a3b8] bg-white/90 backdrop-blur-sm shadow-lg overflow-hidden">
+      {(agentState === 'running' || agentState === 'blocked') && (
+        <div className="fixed bottom-4 right-4 z-50 w-72 rounded-lg border border-dashed border-[#94a3b8] bg-white/90 backdrop-blur-sm shadow-lg overflow-hidden">
           <div className="px-3 py-2 border-b border-dashed border-[#94a3b8] bg-[#f8fafc] flex items-center gap-2">
             <div className="size-1.5 rounded-full bg-[#94a3b8]" />
             <span className="text-[10px] font-medium text-[#64748b] uppercase tracking-widest">Test controls</span>
           </div>
           <div className="p-3 space-y-2">
-            <button
-              onClick={() => {
-                const newCount = pauseCount + 1;
-                const template = DECISION_TEMPLATES[Math.min(newCount - 1, DECISION_TEMPLATES.length - 1)];
-                setDecisions(prev => [...prev, {
-                  id: `d-${newCount}`,
-                  label: template.label,
-                  pattern: template.pattern,
-                  records: template.records,
-                  status: 'pending',
-                  pausedAt: new Date(),
-                }]);
-                setCompletedUpTo(Math.round(progress * 10) / 10);
-                setPauseCount(newCount);
-                setAgentState('paused');
-              }}
-              className="w-full px-3 py-2 text-left text-[12px] font-medium text-[#92400e] bg-[#fef3c7] border border-[#fde68a] rounded hover:bg-[#fde68a] transition-colors flex items-center justify-between"
-            >
-              <span>Simulate pause</span>
-              <span className="text-[10px] text-[#b45309] font-normal">Decision {pauseCount + 1}</span>
-            </button>
+            {/* Block agent — surfaces the next LLM challenge one at a time */}
+            {agentState === 'running' && (() => {
+              const alreadyDiscovered = new Set(decisions.map(d => d.label));
+              const next = DECISION_TEMPLATES.find(t => !alreadyDiscovered.has(t.label));
+              if (!next) return null;
+              return (
+                <button
+                  onClick={() => {
+                    setDecisions(prev => [...prev, {
+                      id: `d-block-${Date.now()}`,
+                      label: next.label,
+                      pattern: next.pattern,
+                      records: next.records,
+                      status: 'pending' as const,
+                      pausedAt: new Date(Date.now() - 8 * 60 * 1000),
+                    }]);
+                  }}
+                  className="w-full px-3 py-2 text-left text-[12px] font-medium text-[#92400e] bg-[#fff7ed] border border-[#fed7aa] rounded hover:bg-[#ffedd5] transition-colors"
+                >
+                  <div className="flex items-center justify-between">
+                    <span>Block agent</span>
+                    <span className="text-[10px] text-[#9a3412] font-normal truncate ml-2 max-w-[140px]">{next.label}</span>
+                  </div>
+                </button>
+              );
+            })()}
+            {agentState === 'blocked' && (
+              <button
+                onClick={() => setAgentState('running')}
+                className="w-full px-3 py-2 text-left text-[12px] font-medium text-[#065f46] bg-[#ecfdf5] border border-[#a7f3d0] rounded hover:bg-[#d1fae5] transition-colors"
+              >
+                Unblock agent
+                <span className="text-[10px] text-[#047857] font-normal ml-2">resume running</span>
+              </button>
+            )}
             <button
               onClick={() => {
                 setFailedAtProgress(Math.round(progress * 10) / 10 || 42);
@@ -1078,7 +1373,7 @@ export default function App() {
             </button>
             <button
               onClick={() => {
-                setProgress(100);
+                setStreamProgress(Object.fromEntries(STREAMS.map(s => [s.id, 100])));
                 setAgentState('completed');
               }}
               className="w-full px-3 py-2 text-left text-[12px] font-medium text-[#065f46] bg-[#ecfdf5] border border-[#a7f3d0] rounded hover:bg-[#d1fae5] transition-colors"
@@ -1232,7 +1527,8 @@ export default function App() {
                 <div className="text-[24px] font-medium text-foreground">8</div>
               </div>
               <div className={`bg-background border rounded-lg px-4 py-3 transition-all ${
-                agentState === 'paused' ? 'border-[#d97706] ring-2 ring-[#d97706]/20' : 'border-border'
+                agentState === 'blocked' ? 'border-[#d97706] ring-2 ring-[#d97706]/20' :
+                (agentState === 'running' && pendingDecisions.length > 0) ? 'border-[#d97706]/50' : 'border-border'
               }`}>
                 <div className="flex items-center justify-between mb-2">
                   <div className="text-[11px] text-muted-foreground uppercase tracking-wide">
@@ -1240,15 +1536,15 @@ export default function App() {
                   </div>
                   <div className="relative">
                     <ListChecks className="size-4 text-[#8b5cf6]" strokeWidth={2} />
-                    {agentState === 'paused' && (
+                    {(agentState === 'blocked' || (agentState === 'running' && pendingDecisions.length > 0)) && (
                       <div className="absolute -top-1 -right-1 size-2 rounded-full bg-[#d97706] animate-pulse" />
                     )}
                   </div>
                 </div>
                 <div className={`text-[24px] font-medium ${
-                  agentState === 'paused' ? 'text-[#d97706]' : 'text-foreground'
+                  (agentState === 'blocked' || (agentState === 'running' && pendingDecisions.length > 0)) ? 'text-[#d97706]' : 'text-foreground'
                 }`}>
-                  {agentState === 'paused' ? 13 : 12}
+                  {pendingDecisions.length > 0 ? 12 + pendingDecisions.length : 12}
                 </div>
               </div>
             </div>
@@ -1331,7 +1627,7 @@ export default function App() {
                           className={`border-b border-border cursor-pointer hover:bg-[#fafafa] ${
                             expandedDataset === dataset.id ? 'bg-[#f5f5f5]' : ''
                           } ${
-                            dataset.id === 'passenger-master' && agentState === 'paused'
+                            dataset.id === 'passenger-master' && agentState === 'blocked'
                               ? 'ring-2 ring-[#d97706]/30 ring-inset'
                               : ''
                           }`}
@@ -1361,7 +1657,7 @@ export default function App() {
                             {dataset.id === 'passenger-master' && agentState === 'proposed' && (
                               <div className="flex items-center gap-1 mt-1">
                                 <AlertTriangle className="size-3 text-[#d97706] shrink-0" strokeWidth={2} />
-                                <span className="text-[11px] text-foreground/60">579K+ records affected · 5 resolvable patterns, 2 edge cases</span>
+                                <span className="text-[11px] text-foreground/60">Issues found in preliminary scan · agent will assess during run</span>
                               </div>
                             )}
                           </td>
@@ -1388,7 +1684,7 @@ export default function App() {
                                               ? 'bg-[#059669] border-[#059669]'
                                               : agentState === 'running'
                                               ? 'bg-[#3b82f6] border-[#3b82f6] ring-4 ring-[#3b82f6]/20'
-                                              : agentState === 'paused'
+                                              : agentState === 'blocked'
                                               ? 'bg-[#d97706] border-[#d97706] ring-4 ring-[#d97706]/20'
                                               : 'bg-background border-border'
                                           }`}
@@ -1397,7 +1693,7 @@ export default function App() {
                                             <CheckCircle className="size-4.5 text-white" strokeWidth={2.5} />
                                           ) : agentState === 'running' ? (
                                             <div className="size-2.5 rounded-full bg-white animate-pulse" />
-                                          ) : agentState === 'paused' ? (
+                                          ) : agentState === 'blocked' ? (
                                             <Pause className="size-4 text-white" strokeWidth={2.5} />
                                           ) : (
                                             <Sparkles className="size-4 text-muted-foreground" strokeWidth={2} />
@@ -1408,17 +1704,19 @@ export default function App() {
                                         <div>
                                           <div className="text-[13px] font-medium text-foreground">
                                             {agentState === 'proposed' && 'AI Remediation Proposed'}
-                                            {agentState === 'running' && 'Agent Running'}
-                                            {agentState === 'paused' && (isStruggling
-                                              ? `Agent struggling — Decision ${resolvedDecisionCount + 1} of ${decisions.length}`
-                                              : `Decision ${resolvedDecisionCount + 1} of ${decisions.length || 1} pending`
+                                            {agentState === 'running' && pendingDecisions.length === 0 && 'Agent Running'}
+                                            {agentState === 'running' && pendingDecisions.length > 0 && `Agent Running · ${pendingDecisions.length} decision${pendingDecisions.length > 1 ? 's' : ''} queued`}
+                                            {agentState === 'blocked' && (isStruggling
+                                              ? 'Agent struggling — decisions unresolved'
+                                              : `Agent blocked — ${pendingDecisions.length} decision${pendingDecisions.length > 1 ? 's' : ''} required to continue`
                                             )}
                                             {agentState === 'completed' && 'Remediation Complete'}
                                           </div>
                                           <div className="text-[11px] text-muted-foreground mt-0.5">
                                             {agentState === 'proposed' && `Ready to start · Estimated runtime: 2–4 hours`}
-                                            {agentState === 'running' && `Processing 1.2M records · ${Math.round(progress * 10) / 10}% complete`}
-                                            {agentState === 'paused' && `Paused ${getTimeSince(new Date(Date.now() - 12 * 60 * 1000))} · Your input needed to continue`}
+                                            {agentState === 'running' && pendingDecisions.length === 0 && `Processing 1.2M records · ${Math.round(progress * 10) / 10}% complete`}
+                                            {agentState === 'running' && pendingDecisions.length > 0 && `${Math.round(progress * 10) / 10}% complete · Processing unaffected records while decisions queue`}
+                                            {agentState === 'blocked' && `Stopped at ${Math.round(progress * 10) / 10}% · All remaining records require your input`}
                                             {agentState === 'completed' && `Finished at 14:32 · Runtime: 3h 47m · All issues resolved`}
                                           </div>
                                         </div>
@@ -1428,7 +1726,7 @@ export default function App() {
                                       {devMode && (
                                         <div className="flex items-center gap-2">
                                           <span className="text-[10px] text-muted-foreground">Dev:</span>
-                                          {(['proposed', 'running', 'paused', 'failed', 'completed'] as const).map((state) => (
+                                          {(['proposed', 'running', 'blocked', 'failed', 'completed'] as const).map((state) => (
                                             <button
                                               key={state}
                                               onClick={() => {
@@ -1464,63 +1762,203 @@ export default function App() {
                                   </div>
 
                                   {/* RESUME VIEW - Shows when user returns after being away */}
-                                  {showResumeView && (agentState === 'running' || agentState === 'paused' || agentState === 'completed') && (
+                                  {showResumeView && (agentState === 'running' || agentState === 'blocked' || agentState === 'completed') && (
                                     <>
-                                      <div className="p-5 border-b border-border bg-[#f0fdf4]">
-                                        <div className="flex items-center gap-2 mb-3">
-                                          <Clock className="size-4 text-[#059669]" strokeWidth={2} />
-                                          <h3 className="text-[14px] font-medium text-foreground">
-                                            {agentState === 'paused' ? 'Agent status: Waiting for your input' :
-                                             agentState === 'completed' ? 'Agent status: Complete' :
-                                             'Agent status: Running'}
-                                          </h3>
-                                        </div>
-
-                                        <div className="mb-4 space-y-2 text-[12px]">
-                                          <div className="text-foreground/70">
-                                            You left 2h 15m ago at {formatTime(new Date(Date.now() - 2 * 60 * 60 * 1000))}
-                                          </div>
-                                          <div className="font-medium text-foreground">Since then:</div>
-                                          <div className="space-y-1.5 ml-4">
-                                            <div className="flex items-center gap-2">
-                                              <CheckCircle className="size-3.5 text-[#059669]" strokeWidth={2} />
-                                              <span className="text-foreground/80">674,657 records processed automatically</span>
+                                      {/* Priority banner — what needs attention right now */}
+                                      {agentState === 'blocked' && (
+                                        <div className="px-5 py-4 border-b border-[#fde68a] bg-[#fffbeb]">
+                                          <div className="flex items-start gap-3">
+                                            <div className="size-8 rounded-full bg-[#fef3c7] border border-[#fde68a] flex items-center justify-center shrink-0 mt-0.5">
+                                              <Pause className="size-4 text-[#d97706]" strokeWidth={2} />
                                             </div>
-                                            {(agentState === 'completed') && (
-                                              <div className="flex items-center gap-2">
-                                                <CheckCircle className="size-3.5 text-[#059669]" strokeWidth={2} />
-                                                <span className="text-foreground/80">1 policy decision approved by you</span>
+                                            <div className="flex-1 min-w-0">
+                                              <div className="text-[14px] font-medium text-foreground mb-0.5">
+                                                Agent is waiting for you — {pendingDecisions.length} decision{pendingDecisions.length > 1 ? 's' : ''} blocking progress
                                               </div>
-                                            )}
-                                            {agentState === 'paused' && (
-                                              <div className="flex items-center gap-2">
-                                                <Pause className="size-3.5 text-[#d97706]" strokeWidth={2} />
-                                                <span className="text-foreground/80">Currently paused on duplicate profiles (28,450 cases)</span>
+                                              <div className="text-[12px] text-foreground/60">
+                                                Oldest waiting {pendingDecisions[0] ? getTimeSince(pendingDecisions[0].pausedAt) : ''} · No records can be processed until you respond
                                               </div>
-                                            )}
+                                            </div>
                                           </div>
                                         </div>
+                                      )}
+                                      {agentState === 'running' && pendingDecisions.length > 0 && (
+                                        <div className="px-5 py-4 border-b border-[#bfdbfe] bg-[#eff6ff]">
+                                          <div className="flex items-start gap-3">
+                                            <div className="size-8 rounded-full bg-[#dbeafe] border border-[#bfdbfe] flex items-center justify-center shrink-0 mt-0.5">
+                                              <AlertTriangle className="size-4 text-[#2563eb]" strokeWidth={2} />
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                              <div className="text-[14px] font-medium text-foreground mb-0.5">
+                                                Agent still running — {pendingDecisions.length} decision{pendingDecisions.length > 1 ? 's' : ''} queued while you were away
+                                              </div>
+                                              <div className="text-[12px] text-foreground/60">
+                                                Other streams are continuing · Queued decisions need your review
+                                              </div>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      )}
+                                      {agentState === 'completed' && (
+                                        <div className="px-5 py-4 border-b border-[#bbf7d0] bg-[#f0fdf4]">
+                                          <div className="flex items-start gap-3">
+                                            <div className="size-8 rounded-full bg-[#d1fae5] border border-[#a7f3d0] flex items-center justify-center shrink-0 mt-0.5">
+                                              <CheckCircle className="size-4 text-[#059669]" strokeWidth={2} />
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                              <div className="text-[14px] font-medium text-foreground mb-0.5">
+                                                Run complete — all records processed
+                                              </div>
+                                              <div className="text-[12px] text-foreground/60">
+                                                Finished at 14:32 · Total runtime: 3h 47m
+                                              </div>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      )}
+                                      {(agentState === 'running' && pendingDecisions.length === 0) && (
+                                        <div className="px-5 py-4 border-b border-[#bfdbfe] bg-[#eff6ff]">
+                                          <div className="flex items-start gap-3">
+                                            <div className="size-8 rounded-full bg-[#dbeafe] border border-[#bfdbfe] flex items-center justify-center shrink-0 mt-0.5">
+                                              <div className="size-2 rounded-full bg-[#2563eb] animate-pulse" />
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                              <div className="text-[14px] font-medium text-foreground mb-0.5">
+                                                Agent running — no action needed yet
+                                              </div>
+                                              <div className="text-[12px] text-foreground/60">
+                                                {Math.round(progress)}% complete · Processing ~15K records/min
+                                              </div>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      )}
 
-                                        <div className="flex items-center gap-3">
+                                      {/* What happened while away */}
+                                      <div className="px-5 py-4 border-b border-border">
+                                        <div className="text-[11px] font-medium text-foreground/40 uppercase tracking-wide mb-3">
+                                          While you were away · 2h 15m
+                                        </div>
+                                        <div className="space-y-2.5">
+                                          <div className="flex items-start gap-3 text-[12px]">
+                                            <CheckCircle className="size-3.5 text-[#059669] mt-0.5 shrink-0" strokeWidth={2} />
+                                            <span className="text-foreground/80">
+                                              {visibleStreams.find(s => s.id === 'low-risk') && streamProgress['low-risk'] > 20
+                                                ? `${Math.round(streamProgress['low-risk'] * 4560).toLocaleString()} records cleaned automatically — format fixes, field defaults, deduplication`
+                                                : '456,000 records cleaned automatically — format fixes, field defaults, deduplication'}
+                                            </span>
+                                          </div>
+                                          {decisions.filter(d => d.status !== 'pending').length > 0 && (
+                                            <div className="flex items-start gap-3 text-[12px]">
+                                              <CheckCircle className="size-3.5 text-[#059669] mt-0.5 shrink-0" strokeWidth={2} />
+                                              <span className="text-foreground/80">
+                                                {decisions.filter(d => d.status !== 'pending').length} decision{decisions.filter(d => d.status !== 'pending').length > 1 ? 's' : ''} you approved{decisions.filter(d => d.status !== 'pending').length > 0 ? ` — ${decisions.filter(d => d.status !== 'pending').reduce((sum, d) => sum + d.records, 0).toLocaleString()} records now processing` : ''}
+                                              </span>
+                                            </div>
+                                          )}
+                                          {pendingDecisions.length > 0 && (
+                                            <div className="flex items-start gap-3 text-[12px]">
+                                              <Pause className="size-3.5 text-[#d97706] mt-0.5 shrink-0" strokeWidth={2} />
+                                              <span className="text-foreground/80">
+                                                {pendingDecisions.length} new pattern{pendingDecisions.length > 1 ? 's' : ''} flagged — {pendingDecisions.reduce((sum, d) => sum + d.records, 0).toLocaleString()} records waiting on your decision
+                                              </span>
+                                            </div>
+                                          )}
+                                          {agentState === 'completed' && (
+                                            <div className="flex items-start gap-3 text-[12px]">
+                                              <CheckCircle className="size-3.5 text-[#059669] mt-0.5 shrink-0" strokeWidth={2} />
+                                              <span className="text-foreground/80">All streams finished — run completed successfully</span>
+                                            </div>
+                                          )}
+                                        </div>
+                                      </div>
+
+                                      {/* Action row */}
+                                      <div className="px-5 py-4 flex items-center gap-3">
+                                        <button
+                                          onClick={() => setShowResumeView(false)}
+                                          className="px-4 py-2 text-white rounded text-[13px] font-medium"
+                                          style={{
+                                            background: agentState === 'blocked'
+                                              ? 'linear-gradient(135deg, #d97706 0%, #b45309 100%)'
+                                              : agentState === 'completed'
+                                              ? 'linear-gradient(135deg, #059669 0%, #047857 100%)'
+                                              : 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)'
+                                          }}
+                                        >
+                                          {agentState === 'blocked' ? `Review ${pendingDecisions.length} decision${pendingDecisions.length > 1 ? 's' : ''} →` :
+                                           agentState === 'completed' ? 'View results →' :
+                                           pendingDecisions.length > 0 ? 'Review queued decisions →' :
+                                           'Continue monitoring'}
+                                        </button>
+                                        <button
+                                          onClick={() => {
+                                            setShowResumeView(false);
+                                            setShowActivityLog(true);
+                                          }}
+                                          className="text-[13px] text-foreground/50 hover:text-foreground font-medium"
+                                        >
+                                          Full activity log
+                                        </button>
+                                      </div>
+                                    </>
+                                  )}
+
+                                  {/* ADJUST RULES PANEL */}
+                                  {agentState === 'proposed' && showAdjustRules && (
+                                    <>
+                                      <div className="p-5 border-b border-border flex items-center justify-between">
+                                        <div>
+                                          <h3 className="text-[14px] font-medium text-foreground">Adjust cleaning rules</h3>
+                                          <p className="text-[12px] text-foreground/50 mt-0.5">Toggle any rule off to exclude it from this run. All enabled rules apply automatically with no approval needed.</p>
+                                        </div>
+                                        <button onClick={() => setShowAdjustRules(false)} className="text-[12px] text-foreground/50 hover:text-foreground font-medium shrink-0 ml-4">← Back</button>
+                                      </div>
+                                      <div className="divide-y divide-border">
+                                        {AUTO_CLEAN_RULES.map((rule, i) => {
+                                          const isEnabled = !disabledAutoRules.has(i);
+                                          return (
+                                            <div key={i} className={`p-5 transition-opacity ${isEnabled ? '' : 'opacity-50'}`}>
+                                              <div className="flex items-start gap-3">
+                                                <button
+                                                  onClick={() => toggleAutoRule(i)}
+                                                  className="mt-0.5 shrink-0"
+                                                  title={isEnabled ? 'Disable this rule' : 'Enable this rule'}
+                                                >
+                                                  <div className={`size-4 rounded border-2 flex items-center justify-center transition-colors ${isEnabled ? 'border-[#3b82f6] bg-[#3b82f6]' : 'border-foreground/20 bg-transparent'}`}>
+                                                    {isEnabled && <Check className="size-3 text-white" strokeWidth={3} />}
+                                                  </div>
+                                                </button>
+                                                <div className="flex-1 min-w-0">
+                                                  <div className="flex items-center gap-2 flex-wrap mb-1">
+                                                    <span className="text-[13px] font-medium text-foreground">{rule.label}</span>
+                                                    <span className="px-1.5 py-0.5 bg-[#d1fae5] text-[#059669] text-[10px] font-medium rounded">{rule.confidence}% confidence</span>
+                                                  </div>
+                                                  <div className="text-[11px] text-foreground/50 mb-2">{rule.records.toLocaleString()} records in scope · {rule.detail}</div>
+                                                  <div className="flex items-center gap-2 text-[11px]">
+                                                    <span className="text-foreground/40">e.g.</span>
+                                                    <span className="px-2 py-0.5 bg-[#fef2f2] border border-[#fecaca] rounded font-mono text-[#dc2626] text-[10px]">{rule.example[0]}</span>
+                                                    <span className="text-foreground/30">→</span>
+                                                    <span className="px-2 py-0.5 bg-[#f0fdf4] border border-[#bbf7d0] rounded font-mono text-[#059669] text-[10px]">{rule.example[1]}</span>
+                                                  </div>
+                                                </div>
+                                              </div>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                      <div className="p-5 border-t border-border bg-[#fafafa]">
+                                        <div className="flex items-center justify-between">
+                                          <div className="text-[12px] text-foreground/60">
+                                            {AUTO_CLEAN_RULES.length - disabledAutoRules.size} of {AUTO_CLEAN_RULES.length} rules active ·{' '}
+                                            <span className="font-medium text-foreground">{activeAutoRuleRecords.toLocaleString()} records</span> in scope
+                                          </div>
                                           <button
-                                            onClick={() => setShowResumeView(false)}
+                                            onClick={() => setShowAdjustRules(false)}
                                             className="px-4 py-2 text-white rounded text-[13px] font-medium"
-                                            style={{
-                                              background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)'
-                                            }}
+                                            style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}
                                           >
-                                            {agentState === 'paused' ? 'Review and continue' :
-                                             agentState === 'completed' ? 'View results' :
-                                             'Continue monitoring'}
-                                          </button>
-                                          <button
-                                            onClick={() => {
-                                              setShowResumeView(false);
-                                              setShowActivityLog(true);
-                                            }}
-                                            className="text-[13px] text-foreground/60 hover:text-foreground font-medium"
-                                          >
-                                            View full activity log
+                                            Confirm and return
                                           </button>
                                         </div>
                                       </div>
@@ -1528,7 +1966,7 @@ export default function App() {
                                   )}
 
                                   {/* STATE 1: PROPOSED APPROACH */}
-                                  {agentState === 'proposed' && !showResumeView && (
+                                  {agentState === 'proposed' && !showResumeView && !showAdjustRules && (
                                     <>
                                       {/* Header */}
                                       <div className="p-5 border-b border-border">
@@ -1541,120 +1979,124 @@ export default function App() {
                                         <div className="flex items-start gap-2 px-3 py-2.5 bg-[#fffbeb] border border-[#fde68a] rounded text-[12px]">
                                           <AlertTriangle className="size-3.5 text-[#d97706] mt-0.5 shrink-0" strokeWidth={2} />
                                           <span className="text-foreground/80">
-                                            <span className="font-medium">579K+ records affected across 7 issue patterns.</span>
-                                            {' '}AI can resolve 5 patterns automatically (~456K records). 2 edge case patterns will be isolated for manual review.
+                                            <span className="font-medium">The majority of records can be cleaned automatically.</span>
+                                            {' '}Based on a preliminary scan, the patterns below look straightforward. The agent will surface anything it cannot resolve confidently as it encounters it, and wait for your input before acting.
                                           </span>
                                         </div>
                                       </div>
 
-                                      {/* Low-risk rules */}
+                                      {/* Auto-cleaning rules */}
                                       <div className="p-5 border-b border-border">
-                                        <div className="flex items-center gap-2 mb-3">
+                                        <div className="flex items-center gap-2 mb-1">
                                           <ShieldCheck className="size-4 text-[#059669]" strokeWidth={2} />
                                           <h3 className="text-[13px] font-medium text-foreground">
-                                            Low-risk (applied automatically)
+                                            Applied automatically — no approval needed
                                           </h3>
                                         </div>
+                                        <p className="text-[11px] text-foreground/50 mb-3 ml-6">All 98–99%+ confidence. Structural and formatting issues only — no passenger merges, no deletions, no identity changes.</p>
                                         <div className="space-y-3">
                                           <div>
                                             <div className="flex items-start gap-2 text-[12px] mb-1">
                                               <CheckCircle className="size-3.5 text-[#059669] mt-0.5 shrink-0" strokeWidth={2} />
-                                              <span className="text-foreground/80">Standardise date formats to ISO-8601</span>
+                                              <span className="text-foreground/80">Fix date formats <span className="text-foreground/40 font-normal">(e.g. "21-03-1985" → "1985-03-21")</span></span>
                                             </div>
-                                            <div className="ml-6 text-[11px] text-foreground/60">
-                                              228,467 records · 99.1% avg confidence
-                                            </div>
+                                            <div className="ml-6 text-[11px] text-foreground/50">~228K records in preliminary scan · 99.1% confidence</div>
                                           </div>
                                           <div>
                                             <div className="flex items-start gap-2 text-[12px] mb-1">
                                               <CheckCircle className="size-3.5 text-[#059669] mt-0.5 shrink-0" strokeWidth={2} />
-                                              <span className="text-foreground/80">Sync loyalty tier from authoritative source</span>
+                                              <span className="text-foreground/80">Update loyalty tier to match the loyalty platform <span className="text-foreground/40 font-normal">(e.g. Silver → Gold where loyalty system is authoritative)</span></span>
                                             </div>
-                                            <div className="ml-6 text-[11px] text-foreground/60">
-                                              142,340 records · 98.7% avg confidence
-                                            </div>
+                                            <div className="ml-6 text-[11px] text-foreground/50">~142K records in preliminary scan · 98.7% confidence</div>
                                           </div>
                                           <div>
                                             <div className="flex items-start gap-2 text-[12px] mb-1">
                                               <CheckCircle className="size-3.5 text-[#059669] mt-0.5 shrink-0" strokeWidth={2} />
-                                              <span className="text-foreground/80">Fix document formatting errors</span>
+                                              <span className="text-foreground/80">Correct travel document field formatting <span className="text-foreground/40 font-normal">(e.g. "GBRGB123456" → "GBR GB123456")</span></span>
                                             </div>
-                                            <div className="ml-6 text-[11px] text-foreground/60">
-                                              86,127 records · 99.8% avg confidence
-                                            </div>
+                                            <div className="ml-6 text-[11px] text-foreground/50">~86K records in preliminary scan · 99.8% confidence</div>
                                           </div>
                                         </div>
                                       </div>
 
-                                      {/* Medium-risk patterns */}
+                                      {/* Will pause for your decision */}
                                       <div className="p-5 border-b border-border">
-                                        <div className="flex items-center gap-2 mb-3">
+                                        <div className="flex items-center gap-2 mb-1">
                                           <Pause className="size-4 text-[#d97706]" strokeWidth={2} />
                                           <h3 className="text-[13px] font-medium text-foreground">
-                                            Medium-risk (requires your approval)
+                                            May pause for your decision
                                           </h3>
                                         </div>
-                                        <div className="space-y-2">
-                                          <div className="flex items-start gap-2 text-[12px]">
-                                            <AlertTriangle className="size-3.5 text-[#d97706] mt-0.5 shrink-0" strokeWidth={2} />
-                                            <span className="text-foreground/80">Merge duplicate profiles when name + DOB + loyalty ID match</span>
+                                        <p className="text-[11px] text-foreground/50 mb-3 ml-6">The agent will flag ambiguous cases as it finds them — it cannot predict all of them in advance. Based on a preliminary scan, patterns like the ones below are likely to come up. Each will be explained in full before you're asked to act.</p>
+                                        <div className="space-y-4">
+                                          <div>
+                                            <div className="flex items-start gap-2 text-[12px] mb-1">
+                                              <AlertTriangle className="size-3.5 text-[#d97706] mt-0.5 shrink-0" strokeWidth={2} />
+                                              <span className="text-foreground/80 font-medium">The same passenger appearing across multiple systems with no matching field</span>
+                                            </div>
+                                            <div className="ml-6 text-[11px] text-foreground/50 leading-relaxed">
+                                              Seen in preliminary scan · resolved by inference from behavioural signals and service notes, not deterministic fields
+                                            </div>
                                           </div>
-                                          <div className="flex items-start gap-2 text-[12px]">
-                                            <AlertTriangle className="size-3.5 text-[#d97706] mt-0.5 shrink-0" strokeWidth={2} />
-                                            <span className="text-foreground/80">Backfill nationality from booking or passport data when confidence is sufficient</span>
+                                          <div>
+                                            <div className="flex items-start gap-2 text-[12px] mb-1">
+                                              <AlertTriangle className="size-3.5 text-[#d97706] mt-0.5 shrink-0" strokeWidth={2} />
+                                              <span className="text-foreground/80 font-medium">Nationality unclear from the travel document on file</span>
+                                            </div>
+                                            <div className="ml-6 text-[11px] text-foreground/50 leading-relaxed">
+                                              Seen in preliminary scan · stateless documents, expired visas, dual nationality — policy decision needed
+                                            </div>
                                           </div>
                                         </div>
                                       </div>
 
-                                      {/* Edge case patterns */}
+                                      {/* Edge cases requiring manual review */}
                                       <div className="p-5 border-b border-border">
-                                        <div className="flex items-center justify-between mb-3">
-                                          <div className="flex items-center gap-2">
-                                            <Shield className="size-4 text-[#7c3aed]" strokeWidth={2} />
-                                            <h3 className="text-[13px] font-medium text-foreground">
-                                              Edge case patterns — isolated for manual review
-                                            </h3>
-                                          </div>
-                                          <span className="text-[11px] text-foreground/50">2 patterns · ~1,900 records</span>
+                                        <div className="flex items-center gap-2 mb-1">
+                                          <Shield className="size-4 text-[#7c3aed]" strokeWidth={2} />
+                                          <h3 className="text-[13px] font-medium text-foreground">
+                                            Some records may be escalated — agent cannot resolve them
+                                          </h3>
                                         </div>
-                                        <div className="space-y-3">
-                                          <div>
-                                            <div className="flex items-start gap-2 text-[12px] mb-1">
-                                              <Shield className="size-3.5 text-[#7c3aed] mt-0.5 shrink-0" strokeWidth={2} />
-                                              <span className="text-foreground/80 font-medium">Records with conflicting identity data across multiple source systems</span>
-                                            </div>
-                                            <div className="ml-6 text-[11px] text-foreground/60">
-                                              Name, DOB, or loyalty ID disagrees between booking, loyalty, and CRM systems — no safe automated resolution possible
-                                            </div>
+                                        <p className="text-[11px] text-foreground/50 mb-3 ml-6">If records are found that no automated action can safely resolve, they will be isolated and flagged for the appropriate team. No changes will be made to them.</p>
+                                        <div>
+                                          <div className="flex items-start gap-2 text-[12px] mb-1">
+                                            <Shield className="size-3.5 text-[#7c3aed] mt-0.5 shrink-0" strokeWidth={2} />
+                                            <span className="text-foreground/80 font-medium">Minor passengers with incomplete or expired guardian consent</span>
                                           </div>
-                                          <div>
-                                            <div className="flex items-start gap-2 text-[12px] mb-1">
-                                              <Shield className="size-3.5 text-[#7c3aed] mt-0.5 shrink-0" strokeWidth={2} />
-                                              <span className="text-foreground/80 font-medium">Records missing critical identity fields with no fallback source available</span>
-                                            </div>
-                                            <div className="ml-6 text-[11px] text-foreground/60">
-                                              Required fields absent in all connected systems — manual enrichment or write-off required
-                                            </div>
+                                          <div className="ml-6 text-[11px] text-foreground/50 leading-relaxed">
+                                            Seen in preliminary scan · GDPR Article 8 and aviation duty-of-care obligations require human verification — cannot be resolved automatically
                                           </div>
                                         </div>
                                       </div>
 
-                                      {/* Reassurance */}
-                                      <div className="p-5 border-b border-border bg-[#fafafa]">
+                                      {/* Reassurance + audit */}
+                                      <div className="p-5 border-b border-border bg-[#fafafa] space-y-2">
                                         <p className="text-[12px] text-foreground font-medium">
-                                          The agent will not apply medium- or high-risk actions without your approval.
+                                          The agent will not make changes to paused or escalated records until you confirm.
                                         </p>
+                                        <div className="flex items-center gap-2 text-[11px] text-foreground/60">
+                                          <CheckCircle className="size-3.5 text-[#059669] shrink-0" strokeWidth={2} />
+                                          <span>Every change is logged with a timestamp and the reason it was made. Any approved action can be reversed up to 30 days after the run completes.</span>
+                                        </div>
                                       </div>
 
                                       {/* Actions */}
                                       <div className="p-5">
                                         <div className="flex items-center justify-between">
-                                          <button className="text-[13px] text-foreground/60 hover:text-foreground font-medium">
-                                            Adjust rules
+                                          <button
+                                            onClick={() => setShowAdjustRules(true)}
+                                            className="text-[13px] text-foreground/60 hover:text-foreground font-medium"
+                                          >
+                                            {disabledAutoRules.size > 0
+                                              ? `Adjust rules (${AUTO_CLEAN_RULES.length - disabledAutoRules.size} of ${AUTO_CLEAN_RULES.length} active)`
+                                              : 'Adjust rules'
+                                            }
                                           </button>
                                           <button
                                             onClick={() => {
-                                              setProgress(0);
+                                              setStreamProgress(Object.fromEntries(STREAMS.map(s => [s.id, 0])));
+                                              setDecisions([]);
                                               setAgentState('running');
                                             }}
                                             className="px-5 py-2.5 text-white rounded text-[13px] font-medium transition-all hover:shadow-md"
@@ -1680,7 +2122,10 @@ export default function App() {
                                         <div className="flex items-center gap-2 mb-2">
                                           <div className="size-2 rounded-full bg-[#3b82f6] animate-pulse" />
                                           <h3 className="text-[14px] font-medium text-foreground">
-                                            Agent running — applying approved low-risk rules
+                                            {pendingDecisions.length > 0
+                                              ? `Agent running — ${STREAMS.filter(s => getStreamStatus(s) === 'blocked').length} stream${STREAMS.filter(s => getStreamStatus(s) === 'blocked').length > 1 ? 's' : ''} paused, ${STREAMS.filter(s => getStreamStatus(s) === 'running').length} active`
+                                              : 'Agent running — processing all streams'
+                                            }
                                           </h3>
                                         </div>
                                         <div className="text-[12px] text-foreground/70">
@@ -1688,20 +2133,64 @@ export default function App() {
                                         </div>
                                       </div>
 
-                                      {/* Progress */}
+                                      {/* Progress — per-stream breakdown */}
                                       <div className="p-5 border-b border-border">
-                                        <div className="mb-3">
-                                          <div className="flex items-center justify-between mb-1.5">
-                                            <span className="text-[12px] font-medium text-foreground">Overall progress</span>
-                                            <span className="text-[12px] text-foreground/70">{Math.round(progress * 10) / 10}%</span>
-                                          </div>
-                                          <div className="h-2 bg-[#e5e7eb] rounded-full overflow-hidden">
-                                            <div
-                                              className="h-full bg-[#3b82f6] transition-all duration-300"
-                                              style={{ width: `${Math.round(progress * 10) / 10}%` }}
-                                            />
-                                          </div>
+                                        {/* Overall bar */}
+                                        <div className="flex items-center justify-between mb-1.5">
+                                          <span className="text-[12px] font-medium text-foreground">Overall progress</span>
+                                          <span className="text-[12px] text-foreground/70">{Math.round(progress * 10) / 10}%</span>
                                         </div>
+                                        <div className="h-1.5 bg-[#e5e7eb] rounded-full overflow-hidden mb-4">
+                                          <div className="h-full bg-[#3b82f6] transition-all duration-500" style={{ width: `${Math.round(progress * 10) / 10}%` }} />
+                                        </div>
+                                        {/* Stream breakdown — only shown once medium-risk patterns have been surfaced */}
+                                        {visibleStreams.length > 1 && (
+                                        <div className="space-y-2.5">
+                                          {visibleStreams.map(stream => {
+                                            const sp = Math.round(streamProgress[stream.id]);
+                                            const status = getStreamStatus(stream);
+                                            const resolvedDecision = stream.decisionLabel
+                                              ? decisions.find(d => d.label === stream.decisionLabel && d.status !== 'pending')
+                                              : null;
+                                            return (
+                                              <div key={stream.id} className="flex items-center gap-2.5">
+                                                <div className="w-40 shrink-0 flex items-center gap-1.5">
+                                                  {status === 'completed'
+                                                    ? <CheckCircle className="size-3 text-[#059669] shrink-0" strokeWidth={2} />
+                                                    : status === 'blocked'
+                                                      ? <Pause className="size-3 text-[#d97706] shrink-0" strokeWidth={2} />
+                                                      : <div className="size-2 rounded-full bg-[#3b82f6] animate-pulse shrink-0" />
+                                                  }
+                                                  <div className="min-w-0">
+                                                    <span className={`text-[11px] font-medium truncate block ${status === 'blocked' ? 'text-[#92400e]' : status === 'completed' ? 'text-foreground/40' : 'text-foreground'}`}>
+                                                      {stream.label}
+                                                    </span>
+                                                    {resolvedDecision && (
+                                                      <span className="text-[10px] text-foreground/35">
+                                                        {resolvedDecision.status === 'approved' ? 'decision applied' : 'skipped'}
+                                                      </span>
+                                                    )}
+                                                  </div>
+                                                </div>
+                                                <div className="flex-1 h-1.5 bg-[#e5e7eb] rounded-full overflow-hidden">
+                                                  <div
+                                                    className={`h-full transition-all duration-500 ${status === 'blocked' ? 'bg-[#d97706]' : status === 'completed' ? 'bg-[#059669]' : 'bg-[#3b82f6]'}`}
+                                                    style={{ width: `${sp}%` }}
+                                                  />
+                                                </div>
+                                                <span className={`text-[11px] w-7 text-right shrink-0 ${status === 'blocked' ? 'text-[#d97706]' : 'text-foreground/40'}`}>{sp}%</span>
+                                                <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0 w-14 text-center ${
+                                                  status === 'completed' ? 'bg-[#d1fae5] text-[#059669]'
+                                                  : status === 'blocked' ? 'bg-[#fef3c7] text-[#d97706]'
+                                                  : 'bg-[#dbeafe] text-[#2563eb]'
+                                                }`}>
+                                                  {status === 'completed' ? 'Done' : status === 'blocked' ? 'Paused' : 'Active'}
+                                                </span>
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+                                        )}
                                       </div>
 
                                       {/* Current actions */}
@@ -1733,6 +2222,143 @@ export default function App() {
                                         </div>
                                       </div>
 
+                                      {/* Decision queue — pending only, disappears once all resolved */}
+                                      {pendingDecisions.length > 0 && (
+                                        <div className="border-b border-border">
+                                          <div className="px-5 py-3 bg-[#fffbeb] border-b border-[#fde68a] flex items-center justify-between">
+                                            <div className="flex items-center gap-2">
+                                              <AlertTriangle className="size-3.5 text-[#d97706]" strokeWidth={2} />
+                                              <span className="text-[12px] font-medium text-[#92400e]">
+                                                {pendingDecisions.length} decision{pendingDecisions.length > 1 ? 's' : ''} queued — agent is still processing other records
+                                              </span>
+                                            </div>
+                                            <span className="text-[11px] text-foreground/50">Resolve at your own pace</span>
+                                          </div>
+                                          <div className="divide-y divide-border">
+                                            {decisions.map((decision) => {
+                                              if (decision.status !== 'pending') return null;
+                                              /* pending decision card below */
+                                              const subPatterns = DECISION_SUB_PATTERNS[decision.label];
+                                              const isDetailOpen = expandedDecisionDetails.has(decision.id);
+                                              const isMinors = decision.label === 'Minors with incomplete consent records';
+                                              const enabledCount = subPatterns ? subPatterns.filter((_, i) => !disabledSubPatterns.has(`${decision.id}-${i}`)).length : null;
+                                              const approveLabel = isMinors
+                                                ? 'Escalate to review'
+                                                : (enabledCount !== null && enabledCount < subPatterns!.length)
+                                                  ? `Approve (${enabledCount} of ${subPatterns!.length})`
+                                                  : 'Approve';
+                                              return (
+                                                <div key={decision.id} className="bg-background">
+                                                  {/* Decision card header */}
+                                                  <div className="px-5 py-3 flex items-center justify-between">
+                                                    <div className="flex items-center gap-3 min-w-0">
+                                                      <div className="size-2 rounded-full bg-[#d97706] shrink-0" />
+                                                      <div className="min-w-0">
+                                                        <div className="text-[12px] font-medium text-foreground">{decision.label}</div>
+                                                        <div className="text-[11px] text-foreground/50">{decision.records.toLocaleString()} records · found {getTimeSince(decision.pausedAt)}</div>
+                                                      </div>
+                                                    </div>
+                                                    <div className="flex items-center gap-2 shrink-0 ml-4">
+                                                      <button
+                                                        onClick={() => setDecisions(prev => prev.map(d =>
+                                                          d.id === decision.id ? { ...d, status: 'skipped', resolvedAt: new Date() } : d
+                                                        ))}
+                                                        className="px-3 py-1.5 text-[12px] text-foreground/60 hover:text-foreground font-medium border border-border rounded hover:bg-accent"
+                                                      >
+                                                        Skip
+                                                      </button>
+                                                      <button
+                                                        onClick={() => {
+                                                          setDecisions(prev => prev.map(d =>
+                                                            d.id === decision.id ? { ...d, status: 'approved', resolvedAt: new Date() } : d
+                                                          ));
+                                                          setUndoCountdown(30);
+                                                        }}
+                                                        className="px-3 py-1.5 text-[12px] font-medium text-white rounded whitespace-nowrap"
+                                                        style={{ background: isMinors ? 'linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%)' : 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}
+                                                      >
+                                                        {approveLabel}
+                                                      </button>
+                                                    </div>
+                                                  </div>
+                                                  {/* Sub-patterns section — collapsed by default */}
+                                                  {subPatterns && (
+                                                    <div className="px-5 pb-4">
+                                                      <button
+                                                        onClick={() => toggleDecisionDetail(decision.id)}
+                                                        className="flex items-center gap-1.5 text-[11px] text-foreground/60 hover:text-foreground mb-2"
+                                                      >
+                                                        {isDetailOpen ? <ChevronDown className="size-3" strokeWidth={2} /> : <ChevronRight className="size-3" strokeWidth={2} />}
+                                                        <span>{decision.records.toLocaleString()} records across {subPatterns.length} sub-patterns — expand to review before approving</span>
+                                                      </button>
+                                                      {isDetailOpen && (
+                                                        <div className="border border-border rounded-lg overflow-hidden divide-y divide-border">
+                                                          {subPatterns.map((rule, i) => {
+                                                            const ruleKey = `${decision.id}-${i}`;
+                                                            const isRuleOpen = expandedRules.has(i) && decision.label === 'Conflicting identity — no shared key';
+                                                            const isDisabled = disabledSubPatterns.has(ruleKey);
+                                                            return (
+                                                              <div key={i} className={`${isRuleOpen ? 'bg-[#fafafa]' : 'bg-background hover:bg-[#fafafa]'} ${isDisabled ? 'opacity-40' : ''}`}>
+                                                                <div className="flex items-center">
+                                                                  <button
+                                                                    onClick={() => toggleSubPattern(ruleKey)}
+                                                                    className="px-3 py-3 shrink-0 flex items-center justify-center border-r border-border hover:bg-accent"
+                                                                    title={isDisabled ? 'Enable sub-pattern' : 'Disable sub-pattern'}
+                                                                  >
+                                                                    <div className={`size-3.5 rounded border-2 flex items-center justify-center shrink-0 transition-colors ${isDisabled ? 'border-foreground/20 bg-transparent' : 'border-[#3b82f6] bg-[#3b82f6]'}`}>
+                                                                      {!isDisabled && <Check className="size-2.5 text-white" strokeWidth={3} />}
+                                                                    </div>
+                                                                  </button>
+                                                                  <button
+                                                                    onClick={() => {
+                                                                      if (decision.label === 'Conflicting identity — no shared key') {
+                                                                        setExpandedRules(prev => { const next = new Set(prev); next.has(i) ? next.delete(i) : next.add(i); return next; });
+                                                                      }
+                                                                    }}
+                                                                    className="flex-1 px-4 py-3 flex items-center gap-3 text-left"
+                                                                  >
+                                                                    {decision.label === 'Conflicting identity — no shared key'
+                                                                      ? (isRuleOpen ? <ChevronDown className="size-3.5 text-foreground/40 shrink-0" strokeWidth={2} /> : <ChevronRight className="size-3.5 text-foreground/40 shrink-0" strokeWidth={2} />)
+                                                                      : <div className="size-3.5 shrink-0" />
+                                                                    }
+                                                                    <div className="flex-1 min-w-0">
+                                                                      <div className="flex items-center gap-2 flex-wrap">
+                                                                        <span className="text-[12px] font-medium text-foreground">{rule.signal}</span>
+                                                                        <span className={`px-1.5 py-0.5 ${rule.confidenceBg} ${rule.confidenceColor} text-[10px] font-medium rounded`}>{rule.confidenceLabel}</span>
+                                                                      </div>
+                                                                      <div className="text-[11px] text-foreground/50 mt-0.5">{rule.action}</div>
+                                                                    </div>
+                                                                    <span className="text-[11px] text-foreground/40 shrink-0 mr-3">{rule.records.toLocaleString()} records</span>
+                                                                  </button>
+                                                                  <div className="px-3 shrink-0 border-l border-border">
+                                                                    <button className="text-[11px] text-[#3b82f6] hover:text-[#2563eb] font-medium whitespace-nowrap py-3">Modify →</button>
+                                                                  </div>
+                                                                </div>
+                                                                {isRuleOpen && (
+                                                                  <div className="px-4 pb-4 pt-1 ml-6 space-y-3">
+                                                                    <p className="text-[12px] text-foreground/70 leading-relaxed">{rule.detail}</p>
+                                                                    <div className="flex items-center gap-2 text-[11px]">
+                                                                      <span className="text-foreground/50">Example:</span>
+                                                                      <span className="px-2 py-0.5 bg-[#fef2f2] border border-[#fecaca] rounded font-mono text-[#dc2626]">{rule.example[0]}</span>
+                                                                      <span className="text-foreground/40">→</span>
+                                                                      <span className="px-2 py-0.5 bg-[#f0fdf4] border border-[#bbf7d0] rounded font-mono text-[#059669]">{rule.example[1]}</span>
+                                                                    </div>
+                                                                  </div>
+                                                                )}
+                                                              </div>
+                                                            );
+                                                          })}
+                                                        </div>
+                                                      )}
+                                                    </div>
+                                                  )}
+                                                </div>
+                                              );
+                                            })}
+                                          </div>
+                                        </div>
+                                      )}
+
                                       {/* Undo countdown banner — shown after approving a policy */}
                                       {undoCountdown !== null && (
                                         <div className="px-5 py-3 border-b border-border bg-[#eff6ff] flex items-center justify-between">
@@ -1750,7 +2376,7 @@ export default function App() {
                                                   ? { ...d, status: 'pending', resolvedAt: undefined }
                                                   : d);
                                               });
-                                              setAgentState('paused');
+                                              // Decision returned to queue — agent keeps running
                                             }}
                                             className="px-3 py-1.5 text-[12px] font-medium border border-[#93c5fd] text-[#2563eb] rounded hover:bg-[#dbeafe] shrink-0"
                                           >
@@ -1765,43 +2391,32 @@ export default function App() {
                                           onClick={() => setShowActivityLog(!showActivityLog)}
                                           className="flex items-center gap-2 text-[13px] font-medium text-foreground mb-3 hover:text-foreground/80"
                                         >
-                                          {showActivityLog ? (
-                                            <ChevronDown className="size-4" strokeWidth={2} />
-                                          ) : (
-                                            <ChevronRight className="size-4" strokeWidth={2} />
-                                          )}
-                                          <span>Activity log (4 events)</span>
+                                          {showActivityLog ? <ChevronDown className="size-4" strokeWidth={2} /> : <ChevronRight className="size-4" strokeWidth={2} />}
+                                          <span>Activity log ({activityLog.length} event{activityLog.length !== 1 ? 's' : ''})</span>
                                         </button>
                                         {showActivityLog && (
-                                          <div className="space-y-2 ml-6">
-                                            <div className="flex items-start gap-3 text-[11px]">
-                                              <span className="text-foreground/40 shrink-0 w-12">{formatTime(new Date())}</span>
-                                              <div className="flex items-center gap-2 flex-1">
-                                                <Activity className="size-3 text-[#3b82f6]" strokeWidth={2} />
-                                                <span className="text-foreground/70">Processing low-risk rules</span>
+                                          <div className="space-y-2 ml-2">
+                                            {activityLog.length === 0 && (
+                                              <div className="text-[11px] text-foreground/40 ml-4">No events yet</div>
+                                            )}
+                                            {activityLog.map(entry => (
+                                              <div key={entry.id} className="flex items-start gap-3 text-[11px]">
+                                                <span className="text-foreground/40 shrink-0 w-12 pt-px">{formatTime(entry.time)}</span>
+                                                <div className="flex items-center gap-2 flex-1">
+                                                  {entry.variant === 'start' && <Play className="size-3 text-foreground/40 shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'stream' && <CheckCircle className="size-3 text-[#059669] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'decision' && <AlertTriangle className="size-3 text-[#d97706] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'approve' && <Check className="size-3 text-[#059669] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'skip' && <SkipForward className="size-3 text-foreground/40 shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'block' && <Pause className="size-3 text-[#d97706] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'resume' && <Play className="size-3 text-[#3b82f6] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'complete' && <CheckCircle className="size-3 text-[#059669] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'error' && <AlertTriangle className="size-3 text-[#dc2626] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'progress' && <Activity className="size-3 text-[#3b82f6] shrink-0" strokeWidth={2} />}
+                                                  <span className="text-foreground/70">{entry.text}</span>
+                                                </div>
                                               </div>
-                                            </div>
-                                            <div className="flex items-start gap-3 text-[11px]">
-                                              <span className="text-foreground/40 shrink-0 w-12">{formatTime(new Date(Date.now() - 5 * 60 * 1000))}</span>
-                                              <div className="flex items-center gap-2 flex-1">
-                                                <Check className="size-3 text-[#059669]" strokeWidth={2} />
-                                                <span className="text-foreground/70">Low-risk rules loaded · 3 policies active</span>
-                                              </div>
-                                            </div>
-                                            <div className="flex items-start gap-3 text-[11px]">
-                                              <span className="text-foreground/40 shrink-0 w-12">{formatTime(new Date(Date.now() - 10 * 60 * 1000))}</span>
-                                              <div className="flex items-center gap-2 flex-1">
-                                                <Check className="size-3 text-[#059669]" strokeWidth={2} />
-                                                <span className="text-foreground/70">Classification complete · 1.2M records scanned</span>
-                                              </div>
-                                            </div>
-                                            <div className="flex items-start gap-3 text-[11px]">
-                                              <span className="text-foreground/40 shrink-0 w-12">{formatTime(startTime)}</span>
-                                              <div className="flex items-center gap-2 flex-1">
-                                                <Play className="size-3 text-foreground/40" strokeWidth={2} />
-                                                <span className="text-foreground/70">Agent initialized</span>
-                                              </div>
-                                            </div>
+                                            ))}
                                           </div>
                                         )}
                                       </div>
@@ -1809,9 +2424,10 @@ export default function App() {
                                   )}
 
                                   {/* STATE 3: PAUSED FOR DECISION */}
-                                  {agentState === 'paused' && !showResumeView && (
+                                  {/* STATE 3: BLOCKED — agent ran out of safe work */}
+                                  {agentState === 'blocked' && !showResumeView && (
                                     <>
-                                      {/* Struggling banner — shown when agent has paused 4+ times */}
+                                      {/* Struggling banner — shown when many decisions pile up unresolved */}
                                       {isStruggling && (
                                         <div className="p-5 border-b border-border bg-[#fef2f2]">
                                           <div className="flex items-start gap-3">
@@ -1821,408 +2437,299 @@ export default function App() {
                                                 Agent is struggling to make progress
                                               </div>
                                               <p className="text-[12px] text-foreground/70 leading-relaxed">
-                                                The agent has paused {pauseCount} times without completing meaningful processing between decisions. This pattern suggests an underlying data quality issue the current ruleset cannot resolve — likely conflicting source systems, ambiguous identity signals, or records outside the scope of the defined rules. Consider reviewing the source data for systemic issues, adjusting confidence thresholds, or escalating to your data engineering team before continuing.
+                                                {pendingDecisions.length} decisions are unresolved and the agent is fully blocked. This volume of unresolved cases suggests an underlying data quality issue the current ruleset cannot handle — likely conflicting source systems, ambiguous identity signals, or records outside the scope of the defined rules. Consider reviewing the source data for systemic issues before continuing.
                                               </p>
                                               <div className="flex items-center gap-3 mt-3">
                                                 <button
-                                                  onClick={() => { setAgentState('proposed'); setProgress(0); setPauseCount(0); setDecisions([]); setCompletedUpTo(0); }}
+                                                  onClick={() => { setAgentState('proposed'); setStreamProgress(Object.fromEntries(STREAMS.map(s => [s.id, 0]))); setDecisions([]); }}
                                                   className="px-3 py-1.5 text-[12px] font-medium bg-white border border-[#fecaca] text-[#dc2626] rounded hover:bg-[#fee2e2]"
                                                 >
                                                   Stop and review data quality
                                                 </button>
-                                                <span className="text-[12px] text-foreground/40">or</span>
-                                                <span className="text-[12px] text-foreground/60">Continue resolving decisions below</span>
+                                                <span className="text-[12px] text-foreground/40">or resolve decisions below</span>
                                               </div>
                                             </div>
                                           </div>
                                         </div>
                                       )}
 
-                                      {/* Header */}
-                                      <div className={`p-5 border-b border-border ${isStruggling ? 'bg-[#fff8f6]' : 'bg-[#fffbeb]'}`}>
+                                      {/* Blocked header */}
+                                      <div className="p-5 border-b border-border bg-[#fffbeb]">
                                         <div className="flex items-center gap-2 mb-2">
-                                          <Pause className={`size-4 ${isStruggling ? 'text-[#dc2626]' : 'text-[#d97706]'}`} strokeWidth={2} />
+                                          <Pause className="size-4 text-[#d97706]" strokeWidth={2} />
                                           <h3 className="text-[14px] font-medium text-foreground">
-                                            {isStruggling ? 'Agent paused — repeated interruptions detected' : 'Agent paused — needs your input to continue'}
+                                            Agent blocked — no safe work remaining
                                           </h3>
                                         </div>
-                                        <div className="text-[12px] text-foreground/70">
-                                          {currentPendingDecision
-                                            ? `Paused ${getTimeSince(currentPendingDecision.pausedAt)} · Decision ${resolvedDecisionCount + 1} of ${decisions.length} pending`
-                                            : `Paused · Decision 1 of 1 pending`
-                                          }
-                                        </div>
+                                        <p className="text-[12px] text-foreground/70">
+                                          The agent has processed everything it can without your input. {pendingDecisions.length} decision{pendingDecisions.length > 1 ? 's' : ''} must be resolved before processing can resume. Resolve them in any order — the agent will pick up each set of records as soon as you approve.
+                                        </p>
                                       </div>
 
-                                      {/* Segmented progress bar */}
+                                      {/* Progress — stream breakdown frozen at block point */}
                                       <div className="p-5 border-b border-border">
-                                        <div className="mb-3">
-                                          <div className="flex items-center justify-between mb-1.5">
-                                            <span className="text-[12px] font-medium text-foreground">Overall progress</span>
-                                            <span className="text-[12px] text-foreground/70">{Math.round(progress * 10) / 10}% (paused)</span>
-                                          </div>
-                                          <div className="h-2 bg-[#e5e7eb] rounded-full overflow-hidden">
-                                            <div
-                                              className="h-full bg-[#d97706]"
-                                              style={{ width: `${Math.round(progress * 10) / 10}%` }}
-                                            />
-                                          </div>
+                                        <div className="flex items-center justify-between mb-1.5">
+                                          <span className="text-[12px] font-medium text-foreground">Overall progress</span>
+                                          <span className="text-[12px] text-foreground/70">{Math.round(progress * 10) / 10}% — all streams blocked</span>
+                                        </div>
+                                        <div className="h-1.5 bg-[#e5e7eb] rounded-full overflow-hidden mb-4">
+                                          <div className="h-full bg-[#d97706]" style={{ width: `${Math.round(progress * 10) / 10}%` }} />
+                                        </div>
+                                        <div className="space-y-2.5">
+                                          {visibleStreams.map(stream => {
+                                            const sp = Math.round(streamProgress[stream.id]);
+                                            const status = getStreamStatus(stream);
+                                            return (
+                                              <div key={stream.id} className="flex items-center gap-2.5">
+                                                <div className="w-40 shrink-0 flex items-center gap-1.5">
+                                                  {status === 'completed'
+                                                    ? <CheckCircle className="size-3 text-[#059669] shrink-0" strokeWidth={2} />
+                                                    : <Pause className="size-3 text-[#d97706] shrink-0" strokeWidth={2} />
+                                                  }
+                                                  <span className={`text-[11px] font-medium truncate ${status === 'completed' ? 'text-foreground/40' : 'text-[#92400e]'}`}>
+                                                    {stream.label}
+                                                  </span>
+                                                </div>
+                                                <div className="flex-1 h-1.5 bg-[#e5e7eb] rounded-full overflow-hidden">
+                                                  <div
+                                                    className={`h-full ${status === 'completed' ? 'bg-[#059669]' : 'bg-[#d97706]'}`}
+                                                    style={{ width: `${sp}%` }}
+                                                  />
+                                                </div>
+                                                <span className="text-[11px] w-7 text-right shrink-0 text-foreground/40">{sp}%</span>
+                                                <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0 w-14 text-center ${status === 'completed' ? 'bg-[#d1fae5] text-[#059669]' : 'bg-[#fef3c7] text-[#d97706]'}`}>
+                                                  {status === 'completed' ? 'Done' : 'Blocked'}
+                                                </span>
+                                              </div>
+                                            );
+                                          })}
                                         </div>
                                       </div>
 
-                                      {/* Processing Status Breakdown */}
-                                      <div className="p-5 border-b border-border bg-[#fafafa]">
-                                        <h3 className="text-[13px] font-medium text-foreground mb-3">
-                                          Processing status
-                                        </h3>
-                                        <div className="space-y-2">
-                                          <div className="flex items-center justify-between text-[12px]">
-                                            <div className="flex items-center gap-2">
-                                              <CheckCircle className="size-3.5 text-[#059669]" strokeWidth={2} />
-                                              <span className="text-foreground/80">Low-risk rules</span>
-                                            </div>
-                                            <span className="text-foreground/60">Complete (228K records)</span>
-                                          </div>
-                                          <div className="flex items-center justify-between text-[12px]">
-                                            <div className="flex items-center gap-2">
-                                              <Pause className="size-3.5 text-[#d97706]" strokeWidth={2} />
-                                              <span className="text-foreground/80">Medium-risk patterns</span>
-                                            </div>
-                                            <span className="text-[#d97706]">Paused - needs your decision</span>
-                                          </div>
-                                          <div className="flex items-center justify-between text-[12px]">
-                                            <div className="flex items-center gap-2">
-                                              <Shield className="size-3.5 text-[#7c3aed]" strokeWidth={2} />
-                                              <span className="text-foreground/80">Edge case patterns</span>
-                                            </div>
-                                            <span className="text-[#7c3aed]">Queued for manual review</span>
-                                          </div>
+                                      {/* Decisions — all in insertion order, pending shows action card, resolved shows outcome */}
+                                      <div className="border-b border-border divide-y divide-border">
+                                        <div className="px-5 py-3 bg-[#fafafa] flex items-center justify-between">
+                                          <span className="text-[12px] font-medium text-foreground">{pendingDecisions.length} decision{pendingDecisions.length > 1 ? 's' : ''} required to continue</span>
+                                          <span className="text-[11px] text-foreground/50">{resolvedDecisionCount > 0 ? `${resolvedDecisionCount} resolved` : 'None resolved yet'}</span>
                                         </div>
-                                      </div>
-
-                                      {/* Decision history panel */}
-                                      {decisions.length > 0 && (
-                                        <div className="p-5 border-b border-border bg-[#fafafa]">
-                                          <h3 className="text-[12px] font-medium text-foreground/60 uppercase tracking-wide mb-3">Decision history</h3>
-                                          <div className="space-y-2">
-                                            {decisions.map((d, i) => (
-                                              <div key={d.id} className={`flex items-center justify-between py-2 px-3 rounded border text-[12px] ${
-                                                d.status === 'pending'
-                                                  ? 'bg-[#fffbeb] border-[#fde68a]'
-                                                  : 'bg-background border-border'
-                                              }`}>
-                                                <div className="flex items-center gap-2.5 flex-1 min-w-0">
-                                                  {d.status === 'pending' ? (
-                                                    <Pause className="size-3.5 text-[#d97706] shrink-0" strokeWidth={2} />
-                                                  ) : d.status === 'approved' ? (
-                                                    <CheckCircle className="size-3.5 text-[#059669] shrink-0" strokeWidth={2} />
-                                                  ) : (
-                                                    <SkipForward className="size-3.5 text-foreground/40 shrink-0" strokeWidth={2} />
+                                        {decisions.map((decision) => {
+                                          if (decision.status !== 'pending') {
+                                            const outcome = DECISION_OUTCOMES[decision.label];
+                                            return (
+                                              <div key={`resolved-blocked-${decision.id}`} className="bg-[#fafafa]">
+                                                <div className="px-5 py-4">
+                                                  <div className="flex items-center justify-between mb-2.5">
+                                                    <div className="flex items-center gap-2 min-w-0">
+                                                      {decision.status === 'approved'
+                                                        ? <CheckCircle className="size-4 text-[#059669] shrink-0" strokeWidth={2} />
+                                                        : <SkipForward className="size-4 text-foreground/40 shrink-0" strokeWidth={2} />
+                                                      }
+                                                      <span className="text-[13px] font-medium text-foreground/80 truncate">{decision.label}</span>
+                                                    </div>
+                                                    <div className="flex items-center gap-2 shrink-0 ml-4">
+                                                      <span className={`px-2 py-0.5 rounded text-[11px] font-medium ${decision.status === 'approved' ? 'bg-[#d1fae5] text-[#059669]' : 'bg-[#f3f4f6] text-foreground/50'}`}>
+                                                        {decision.status === 'approved' ? 'Applied' : 'Skipped'}
+                                                      </span>
+                                                      {decision.resolvedAt && <span className="text-[11px] text-foreground/40">{formatTime(decision.resolvedAt)}</span>}
+                                                    </div>
+                                                  </div>
+                                                  {decision.status === 'approved' && outcome && (
+                                                    <div className="ml-6 space-y-2">
+                                                      <div className="text-[12px] text-foreground/60 font-medium">{outcome.headline}</div>
+                                                      {outcome.lines.map((line, li) => (
+                                                        <div key={li} className="flex items-start gap-2 text-[11px]">
+                                                          {line.variant === 'applied' && <CheckCircle className="size-3 text-[#059669] mt-0.5 shrink-0" strokeWidth={2} />}
+                                                          {line.variant === 'flagged' && <AlertTriangle className="size-3 text-[#d97706] mt-0.5 shrink-0" strokeWidth={2} />}
+                                                          {line.variant === 'escalated' && <Shield className="size-3 text-[#7c3aed] mt-0.5 shrink-0" strokeWidth={2} />}
+                                                          <span className="text-foreground/60">{line.text}</span>
+                                                        </div>
+                                                      ))}
+                                                    </div>
                                                   )}
+                                                </div>
+                                              </div>
+                                            );
+                                          }
+                                          /* pending decision card below */
+                                          const subPatterns = DECISION_SUB_PATTERNS[decision.label];
+                                          const isDetailOpen = expandedDecisionDetails.has(decision.id);
+                                          const isMinors = decision.label === 'Minors with incomplete consent records';
+                                          const enabledCount = subPatterns ? subPatterns.filter((_, i) => !disabledSubPatterns.has(`${decision.id}-${i}`)).length : null;
+                                          const approveLabel = isMinors
+                                            ? 'Escalate to review'
+                                            : (enabledCount !== null && enabledCount < subPatterns!.length)
+                                              ? `Approve (${enabledCount} of ${subPatterns!.length})`
+                                              : 'Approve';
+                                          return (
+                                            <div key={decision.id} className="bg-background">
+                                              {/* Decision header */}
+                                              <div className="px-5 py-4 flex items-start justify-between gap-4">
+                                                <div className="flex items-start gap-3 min-w-0">
+                                                  <div className="size-2 rounded-full bg-[#d97706] mt-1.5 shrink-0" />
                                                   <div className="min-w-0">
-                                                    <span className="font-medium text-foreground truncate block">{i + 1}. {d.label}</span>
-                                                    <span className="text-[11px] text-foreground/50">{d.records.toLocaleString()} records</span>
+                                                    <div className="text-[13px] font-medium text-foreground">{decision.label}</div>
+                                                    <div className="text-[11px] text-foreground/50 mt-0.5">{decision.records.toLocaleString()} records blocked · queued {getTimeSince(decision.pausedAt)}</div>
                                                   </div>
                                                 </div>
-                                                <div className="text-right shrink-0 ml-3">
-                                                  {d.status === 'pending' ? (
-                                                    <span className="px-2 py-0.5 bg-[#fef3c7] text-[#d97706] text-[11px] font-medium rounded">Pending</span>
-                                                  ) : d.status === 'approved' ? (
-                                                    <div>
-                                                      <span className="px-2 py-0.5 bg-[#d1fae5] text-[#059669] text-[11px] font-medium rounded">Approved</span>
-                                                      {d.resolvedAt && <div className="text-[10px] text-foreground/40 mt-0.5">{formatTime(d.resolvedAt)}</div>}
+                                                <div className="flex items-center gap-2 shrink-0">
+                                                  <button
+                                                    onClick={() => setDecisions(prev => prev.map(d =>
+                                                      d.id === decision.id ? { ...d, status: 'skipped', resolvedAt: new Date() } : d
+                                                    ))}
+                                                    className="px-3 py-1.5 text-[12px] text-foreground/60 hover:text-foreground font-medium border border-border rounded hover:bg-accent"
+                                                  >
+                                                    Skip
+                                                  </button>
+                                                  <button
+                                                    onClick={() => {
+                                                      setDecisions(prev => prev.map(d =>
+                                                        d.id === decision.id ? { ...d, status: 'approved', resolvedAt: new Date() } : d
+                                                      ));
+                                                      setUndoCountdown(30);
+                                                    }}
+                                                    className="px-4 py-1.5 text-[12px] font-medium text-white rounded whitespace-nowrap"
+                                                    style={{ background: isMinors ? 'linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%)' : 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}
+                                                  >
+                                                    <div className="flex items-center gap-1.5">
+                                                      <Check className="size-3.5" strokeWidth={2.5} />
+                                                      <span>{approveLabel}</span>
                                                     </div>
-                                                  ) : (
-                                                    <div>
-                                                      <span className="px-2 py-0.5 bg-[#f3f4f6] text-foreground/50 text-[11px] font-medium rounded">Skipped</span>
-                                                      {d.resolvedAt && <div className="text-[10px] text-foreground/40 mt-0.5">{formatTime(d.resolvedAt)}</div>}
+                                                  </button>
+                                                </div>
+                                              </div>
+                                              {/* Sub-patterns section — collapsed by default */}
+                                              {subPatterns && (
+                                                <div className="px-5 pb-4">
+                                                  <button
+                                                    onClick={() => toggleDecisionDetail(decision.id)}
+                                                    className="flex items-center gap-1.5 text-[11px] text-foreground/60 hover:text-foreground mb-2"
+                                                  >
+                                                    {isDetailOpen ? <ChevronDown className="size-3" strokeWidth={2} /> : <ChevronRight className="size-3" strokeWidth={2} />}
+                                                    <span>{decision.records.toLocaleString()} records across {subPatterns.length} sub-patterns — expand to review before approving</span>
+                                                  </button>
+                                                  {isDetailOpen && (
+                                                    <div className="border border-border rounded-lg overflow-hidden divide-y divide-border">
+                                                      {subPatterns.map((rule, i) => {
+                                                        const ruleKey = `${decision.id}-${i}`;
+                                                        const isRuleOpen = expandedRules.has(i) && decision.label === 'Conflicting identity — no shared key';
+                                                        const isDisabled = disabledSubPatterns.has(ruleKey);
+                                                        return (
+                                                          <div key={i} className={`${isRuleOpen ? 'bg-[#fafafa]' : 'bg-background hover:bg-[#fafafa]'} ${isDisabled ? 'opacity-40' : ''}`}>
+                                                            <div className="flex items-center">
+                                                              <button
+                                                                onClick={() => toggleSubPattern(ruleKey)}
+                                                                className="px-3 py-3 shrink-0 flex items-center justify-center border-r border-border hover:bg-accent"
+                                                                title={isDisabled ? 'Enable sub-pattern' : 'Disable sub-pattern'}
+                                                              >
+                                                                <div className={`size-3.5 rounded border-2 flex items-center justify-center shrink-0 transition-colors ${isDisabled ? 'border-foreground/20 bg-transparent' : 'border-[#3b82f6] bg-[#3b82f6]'}`}>
+                                                                  {!isDisabled && <Check className="size-2.5 text-white" strokeWidth={3} />}
+                                                                </div>
+                                                              </button>
+                                                              <button
+                                                                onClick={() => {
+                                                                  if (decision.label === 'Conflicting identity — no shared key') {
+                                                                    setExpandedRules(prev => { const next = new Set(prev); next.has(i) ? next.delete(i) : next.add(i); return next; });
+                                                                  }
+                                                                }}
+                                                                className="flex-1 px-4 py-3 flex items-center gap-3 text-left"
+                                                              >
+                                                                {decision.label === 'Conflicting identity — no shared key'
+                                                                  ? (isRuleOpen ? <ChevronDown className="size-3.5 text-foreground/40 shrink-0" strokeWidth={2} /> : <ChevronRight className="size-3.5 text-foreground/40 shrink-0" strokeWidth={2} />)
+                                                                  : <div className="size-3.5 shrink-0" />
+                                                                }
+                                                                <div className="flex-1 min-w-0">
+                                                                  <div className="flex items-center gap-2 flex-wrap">
+                                                                    <span className="text-[12px] font-medium text-foreground">{rule.signal}</span>
+                                                                    <span className={`px-1.5 py-0.5 ${rule.confidenceBg} ${rule.confidenceColor} text-[10px] font-medium rounded`}>{rule.confidenceLabel}</span>
+                                                                  </div>
+                                                                  <div className="text-[11px] text-foreground/50 mt-0.5">{rule.action}</div>
+                                                                </div>
+                                                                <span className="text-[11px] text-foreground/40 shrink-0 mr-3">{rule.records.toLocaleString()} records</span>
+                                                              </button>
+                                                              <div className="px-3 shrink-0 border-l border-border">
+                                                                <button className="text-[11px] text-[#3b82f6] hover:text-[#2563eb] font-medium whitespace-nowrap py-3">Modify →</button>
+                                                              </div>
+                                                            </div>
+                                                            {isRuleOpen && (
+                                                              <div className="px-4 pb-4 pt-1 ml-6 space-y-3">
+                                                                <p className="text-[12px] text-foreground/70 leading-relaxed">{rule.detail}</p>
+                                                                <div className="flex items-center gap-2 text-[11px]">
+                                                                  <span className="text-foreground/50">Example:</span>
+                                                                  <span className="px-2 py-0.5 bg-[#fef2f2] border border-[#fecaca] rounded font-mono text-[#dc2626]">{rule.example[0]}</span>
+                                                                  <span className="text-foreground/40">→</span>
+                                                                  <span className="px-2 py-0.5 bg-[#f0fdf4] border border-[#bbf7d0] rounded font-mono text-[#059669]">{rule.example[1]}</span>
+                                                                </div>
+                                                              </div>
+                                                            )}
+                                                          </div>
+                                                        );
+                                                      })}
                                                     </div>
                                                   )}
                                                 </div>
-                                              </div>
-                                            ))}
-                                          </div>
-                                        </div>
-                                      )}
+                                              )}
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
 
-                                      {/* Policy decision card */}
-                                      <div className="p-5 border-b border-border">
-                                        <div className="flex items-center justify-between mb-3">
-                                          <h3 className="text-[13px] font-medium text-foreground">
-                                            {currentPendingDecision?.label ?? 'Duplicate passenger profiles'}
-                                          </h3>
-                                          <div className="px-2 py-1 bg-[#fef3c7] text-[#d97706] text-[11px] font-medium rounded">
-                                            Decision {resolvedDecisionCount + 1} of {decisions.length || 1}
-                                          </div>
-                                        </div>
-                                        <p className="text-[11px] text-foreground/60 mb-4">
-                                          {currentPendingDecision?.pattern
-                                            ? `Pattern: ${currentPendingDecision.pattern} · ${currentPendingDecision.records.toLocaleString()} matching records`
-                                            : `Based on initial scan, we've found 2 patterns that need your input. This is the first one.`
-                                          }
-                                        </p>
 
-                                        <div className="mb-4 space-y-2 text-[12px]">
-                                          <div>
-                                            <span className="text-foreground/70">Pattern found:</span>
-                                            <span className="text-foreground font-medium ml-1">Name, date of birth, and loyalty ID match</span>
-                                          </div>
-                                          <div>
-                                            <span className="text-foreground/70">Risk level:</span>
-                                            <span className="text-[#d97706] font-medium ml-1">Medium — affects passenger identity</span>
-                                          </div>
-                                          <div className="flex items-center gap-2">
-                                            <span className="text-foreground/70">Matching cases:</span>
-                                            <span className="text-foreground font-medium">28,450 records</span>
+                                      {/* Resume CTA — shown once all decisions are resolved */}
+                                      {pendingDecisions.length === 0 && decisions.length > 0 && (
+                                        <div className="p-5 border-b border-border bg-[#f0fdf4]">
+                                          <div className="flex items-center justify-between">
+                                            <div className="flex items-center gap-2 text-[12px] text-[#059669]">
+                                              <CheckCircle className="size-4" strokeWidth={2} />
+                                              <span>All decisions resolved — ready to resume</span>
+                                            </div>
                                             <button
-                                              onClick={() => setShowConfidenceBreakdown(!showConfidenceBreakdown)}
-                                              className="text-[#3b82f6] hover:text-[#2563eb] text-[11px] font-medium"
+                                              onClick={() => setAgentState('running')}
+                                              className="px-4 py-2 text-white rounded text-[13px] font-medium"
+                                              style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}
                                             >
-                                              {showConfidenceBreakdown ? 'Hide' : 'View'} confidence breakdown →
+                                              <div className="flex items-center gap-2">
+                                                <Play className="size-4" strokeWidth={2} />
+                                                <span>Resume processing</span>
+                                              </div>
                                             </button>
                                           </div>
                                         </div>
-
-                                        {showConfidenceBreakdown && (
-                                          <div className="mb-4 p-3 bg-[#fafafa] rounded border border-border">
-                                            <div className="text-[11px] font-medium text-foreground/70 mb-2">CONFIDENCE BREAKDOWN</div>
-                                            <div className="space-y-2 text-[12px]">
-                                              <div className="flex items-center justify-between">
-                                                <span className="text-foreground/70">95-100% confidence (can auto-merge)</span>
-                                                <span className="font-medium text-foreground">18,340 records</span>
-                                              </div>
-                                              <div className="flex items-center justify-between">
-                                                <span className="text-foreground/70">85-94% confidence (merge with flag)</span>
-                                                <span className="font-medium text-foreground">8,210 records</span>
-                                              </div>
-                                              <div className="flex items-center justify-between">
-                                                <span className="text-foreground/70">&lt;85% confidence (manual review)</span>
-                                                <span className="font-medium text-[#d97706]">1,900 records</span>
-                                              </div>
-                                            </div>
-                                            <div className="mt-3 pt-3 border-t border-border text-[11px] text-foreground/60">
-                                              Confidence based on field similarity, data source reliability, and historical merge accuracy
-                                            </div>
-                                          </div>
-                                        )}
-
-                                        <div className="mb-4">
-                                          <div className="text-[11px] font-medium text-foreground/70 mb-3">SAMPLE RECORD PAIR</div>
-
-                                          {/* Detailed comparison card */}
-                                          <div className="border border-border rounded-lg overflow-hidden">
-                                            <div className="bg-[#fafafa] px-3 py-2 border-b border-border">
-                                              <div className="text-[11px] font-medium text-foreground">Record Pair #1 - Likely Duplicate</div>
-                                              <div className="text-[10px] text-foreground/60 mt-0.5">
-                                                Similarity: 96.8% · Proposed: Merge (keep Profile A as primary)
-                                              </div>
-                                            </div>
-                                            <div className="p-3">
-                                              <div className="grid grid-cols-2 gap-3">
-                                                {/* Profile A */}
-                                                <div className="border border-border rounded p-3 bg-background">
-                                                  <div className="text-[10px] font-medium text-foreground/60 mb-2">PROFILE A (Booking System)</div>
-                                                  <div className="space-y-1.5 text-[11px]">
-                                                    <div className="flex justify-between">
-                                                      <span className="text-foreground/60">Name:</span>
-                                                      <span className="font-medium">Sarah Chen</span>
-                                                    </div>
-                                                    <div className="flex justify-between">
-                                                      <span className="text-foreground/60">DOB:</span>
-                                                      <span className="font-medium">1985-03-14</span>
-                                                    </div>
-                                                    <div className="flex justify-between">
-                                                      <span className="text-foreground/60">Loyalty:</span>
-                                                      <span className="font-medium">LY847392</span>
-                                                    </div>
-                                                    <div className="flex justify-between">
-                                                      <span className="text-foreground/60">Email:</span>
-                                                      <span className="font-medium text-[#d97706]">sarah.c@email.com</span>
-                                                    </div>
-                                                    <div className="flex justify-between">
-                                                      <span className="text-foreground/60">Bookings:</span>
-                                                      <span className="font-medium">12 flights</span>
-                                                    </div>
-                                                    <div className="flex justify-between">
-                                                      <span className="text-foreground/60">Created:</span>
-                                                      <span className="font-medium">2019-03-15</span>
-                                                    </div>
-                                                  </div>
-                                                </div>
-
-                                                {/* Profile B */}
-                                                <div className="border border-border rounded p-3 bg-background">
-                                                  <div className="text-[10px] font-medium text-foreground/60 mb-2">PROFILE B (Loyalty System)</div>
-                                                  <div className="space-y-1.5 text-[11px]">
-                                                    <div className="flex justify-between">
-                                                      <span className="text-foreground/60">Name:</span>
-                                                      <span className="font-medium">Sarah Chen</span>
-                                                    </div>
-                                                    <div className="flex justify-between">
-                                                      <span className="text-foreground/60">DOB:</span>
-                                                      <span className="font-medium">1985-03-14</span>
-                                                    </div>
-                                                    <div className="flex justify-between">
-                                                      <span className="text-foreground/60">Loyalty:</span>
-                                                      <span className="font-medium">LY847392</span>
-                                                    </div>
-                                                    <div className="flex justify-between">
-                                                      <span className="text-foreground/60">Email:</span>
-                                                      <span className="font-medium text-[#d97706]">sc2024@email.com</span>
-                                                    </div>
-                                                    <div className="flex justify-between">
-                                                      <span className="text-foreground/60">Points:</span>
-                                                      <span className="font-medium">45,820</span>
-                                                    </div>
-                                                    <div className="flex justify-between">
-                                                      <span className="text-foreground/60">Created:</span>
-                                                      <span className="font-medium">2024-01-08</span>
-                                                    </div>
-                                                  </div>
-                                                </div>
-                                              </div>
-
-                                              {/* Analysis */}
-                                              <div className="mt-3 pt-3 border-t border-border space-y-2 text-[11px]">
-                                                <div>
-                                                  <span className="text-foreground/60">Proposed merge:</span>
-                                                  <span className="text-foreground ml-1">Keep Profile A (older, more complete), migrate loyalty points from Profile B</span>
-                                                </div>
-                                                <div className="flex items-center gap-1">
-                                                  <AlertTriangle className="size-3 text-[#d97706]" strokeWidth={2} />
-                                                  <span className="text-foreground/60">Conflict:</span>
-                                                  <span className="text-foreground ml-1">Email addresses differ (will preserve both in contact history)</span>
-                                                </div>
-                                                <div className="flex items-center gap-1">
-                                                  <CheckCircle className="size-3 text-[#059669]" strokeWidth={2} />
-                                                  <span className="text-foreground/60">Confidence:</span>
-                                                  <span className="px-2 py-0.5 bg-[#d1fae5] text-[#059669] text-[10px] font-medium rounded">96.8%</span>
-                                                </div>
-                                              </div>
-                                            </div>
-                                          </div>
-                                        </div>
-
-                                        <div className="mb-4">
-                                          <div className="text-[12px] font-medium text-foreground mb-2">Proposed approach</div>
-                                          <p className="text-[12px] text-foreground/80">
-                                            Merge using most recent active record as primary. Preserve all booking history and loyalty points.
-                                          </p>
-                                        </div>
-
-                                        <p className="text-[11px] text-muted-foreground mb-4">
-                                          Your decision will apply only to cases matching this pattern.
-                                        </p>
-                                      </div>
+                                      )}
 
                                       {/* Activity log */}
-                                      <div className="p-5 border-b border-border">
+                                      <div className="p-5">
                                         <button
                                           onClick={() => setShowActivityLog(!showActivityLog)}
                                           className="flex items-center gap-2 text-[13px] font-medium text-foreground mb-3 hover:text-foreground/80"
                                         >
-                                          {showActivityLog ? (
-                                            <ChevronDown className="size-4" strokeWidth={2} />
-                                          ) : (
-                                            <ChevronRight className="size-4" strokeWidth={2} />
-                                          )}
-                                          <span>Activity log (6 events)</span>
+                                          {showActivityLog ? <ChevronDown className="size-4" strokeWidth={2} /> : <ChevronRight className="size-4" strokeWidth={2} />}
+                                          <span>Activity log ({activityLog.length} event{activityLog.length !== 1 ? 's' : ''})</span>
                                         </button>
                                         {showActivityLog && (
-                                          <div className="space-y-2 ml-6">
-                                            <div className="flex items-start gap-3 text-[11px]">
-                                              <span className="text-foreground/40 shrink-0 w-12">{formatTime(new Date())}</span>
-                                              <div className="flex items-center gap-2 flex-1">
-                                                <Pause className="size-3 text-[#d97706]" strokeWidth={2} />
-                                                <span className="text-foreground/70">Paused for decision: Duplicate profiles pattern</span>
+                                          <div className="space-y-2 ml-2">
+                                            {activityLog.length === 0 && (
+                                              <div className="text-[11px] text-foreground/40 ml-4">No events yet</div>
+                                            )}
+                                            {activityLog.map(entry => (
+                                              <div key={entry.id} className="flex items-start gap-3 text-[11px]">
+                                                <span className="text-foreground/40 shrink-0 w-12 pt-px">{formatTime(entry.time)}</span>
+                                                <div className="flex items-center gap-2 flex-1">
+                                                  {entry.variant === 'start' && <Play className="size-3 text-foreground/40 shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'stream' && <CheckCircle className="size-3 text-[#059669] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'decision' && <AlertTriangle className="size-3 text-[#d97706] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'approve' && <Check className="size-3 text-[#059669] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'skip' && <SkipForward className="size-3 text-foreground/40 shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'block' && <Pause className="size-3 text-[#d97706] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'resume' && <Play className="size-3 text-[#3b82f6] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'complete' && <CheckCircle className="size-3 text-[#059669] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'error' && <AlertTriangle className="size-3 text-[#dc2626] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'progress' && <Activity className="size-3 text-[#3b82f6] shrink-0" strokeWidth={2} />}
+                                                  <span className="text-foreground/70">{entry.text}</span>
+                                                </div>
                                               </div>
-                                            </div>
-                                            <div className="flex items-start gap-3 text-[11px]">
-                                              <span className="text-foreground/40 shrink-0 w-12">{formatTime(new Date(Date.now() - 12 * 60 * 1000))}</span>
-                                              <div className="flex items-center gap-2 flex-1">
-                                                <Check className="size-3 text-[#059669]" strokeWidth={2} />
-                                                <span className="text-foreground/70">Completed: Low-risk rules (228K records processed)</span>
-                                              </div>
-                                            </div>
-                                            <div className="flex items-start gap-3 text-[11px]">
-                                              <span className="text-foreground/40 shrink-0 w-12">{formatTime(new Date(Date.now() - 20 * 60 * 1000))}</span>
-                                              <div className="flex items-center gap-2 flex-1">
-                                                <Check className="size-3 text-[#059669]" strokeWidth={2} />
-                                                <span className="text-foreground/70">Started: Processing low-risk rules</span>
-                                              </div>
-                                            </div>
-                                            <div className="flex items-start gap-3 text-[11px]">
-                                              <span className="text-foreground/40 shrink-0 w-12">{formatTime(new Date(Date.now() - 30 * 60 * 1000))}</span>
-                                              <div className="flex items-center gap-2 flex-1">
-                                                <Check className="size-3 text-[#059669]" strokeWidth={2} />
-                                                <span className="text-foreground/70">Low-risk rules loaded · 3 policies active</span>
-                                              </div>
-                                            </div>
-                                            <div className="flex items-start gap-3 text-[11px]">
-                                              <span className="text-foreground/40 shrink-0 w-12">{formatTime(new Date(Date.now() - 40 * 60 * 1000))}</span>
-                                              <div className="flex items-center gap-2 flex-1">
-                                                <Check className="size-3 text-[#059669]" strokeWidth={2} />
-                                                <span className="text-foreground/70">Classification complete · 1.2M records scanned</span>
-                                              </div>
-                                            </div>
-                                            <div className="flex items-start gap-3 text-[11px]">
-                                              <span className="text-foreground/40 shrink-0 w-12">{formatTime(startTime)}</span>
-                                              <div className="flex items-center gap-2 flex-1">
-                                                <Play className="size-3 text-foreground/40" strokeWidth={2} />
-                                                <span className="text-foreground/70">Agent initialized</span>
-                                              </div>
-                                            </div>
+                                            ))}
                                           </div>
                                         )}
-                                      </div>
-
-                                      {/* Actions */}
-                                      <div className="p-5">
-                                        <div className="flex items-center justify-end gap-3">
-                                          <button
-                                            onClick={() => {
-                                              if (currentPendingDecision) {
-                                                setDecisions(prev => prev.map(d =>
-                                                  d.id === currentPendingDecision.id
-                                                    ? { ...d, status: 'skipped', resolvedAt: new Date() }
-                                                    : d
-                                                ));
-                                              }
-                                              setAgentState('running');
-                                            }}
-                                            className="text-[13px] text-foreground/60 hover:text-foreground font-medium"
-                                          >
-                                            Skip for now
-                                          </button>
-                                          <button className="px-4 py-2 bg-white text-foreground border border-border rounded text-[13px] font-medium hover:bg-accent">
-                                            <div className="flex items-center gap-2">
-                                              <Edit3 className="size-3.5" strokeWidth={2} />
-                                              <span>Modify rule</span>
-                                            </div>
-                                          </button>
-                                          <button
-                                            onClick={() => {
-                                              if (currentPendingDecision) {
-                                                setDecisions(prev => prev.map(d =>
-                                                  d.id === currentPendingDecision.id
-                                                    ? { ...d, status: 'approved', resolvedAt: new Date() }
-                                                    : d
-                                                ));
-                                              }
-                                              setUndoCountdown(30);
-                                              setAgentState('running');
-                                            }}
-                                            className="px-5 py-2.5 text-white rounded text-[13px] font-medium transition-all hover:shadow-md"
-                                            style={{
-                                              background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)'
-                                            }}
-                                          >
-                                            <div className="flex items-center gap-2">
-                                              <Check className="size-4" strokeWidth={2} />
-                                              <span>Approve policy</span>
-                                            </div>
-                                          </button>
-                                        </div>
                                       </div>
                                     </>
                                   )}
@@ -2317,10 +2824,8 @@ export default function App() {
                                           <button
                                             onClick={() => {
                                               setAgentState('proposed');
-                                              setProgress(0);
-                                              setPauseCount(0);
+                                              setStreamProgress(Object.fromEntries(STREAMS.map(s => [s.id, 0])));
                                               setDecisions([]);
-                                              setCompletedUpTo(0);
                                               setFailedAtProgress(0);
                                             }}
                                             className="px-4 py-2 bg-white text-foreground border border-border rounded text-[13px] font-medium hover:bg-accent"
@@ -2351,60 +2856,94 @@ export default function App() {
 
                                       {/* Summary */}
                                       <div className="p-5 border-b border-border">
-                                        <div className="flex items-center justify-between mb-3">
-                                          <h3 className="text-[13px] font-medium text-foreground">
-                                            Summary
-                                          </h3>
-                                          <button
-                                            onClick={() => setShowConfidenceBreakdown(!showConfidenceBreakdown)}
-                                            className="text-[12px] text-[#3b82f6] hover:text-[#2563eb] font-medium"
-                                          >
-                                            {showConfidenceBreakdown ? 'Hide' : 'Show'} confidence breakdown →
-                                          </button>
-                                        </div>
-                                        <div className="grid grid-cols-3 gap-4 mb-4">
-                                          <div>
-                                            <div className="text-[24px] font-medium text-foreground">674,657</div>
-                                            <div className="text-[11px] text-foreground/70 mb-1">Auto-resolved</div>
-                                            {showConfidenceBreakdown && (
-                                              <div className="space-y-0.5 text-[10px] text-foreground/60">
-                                                <div>99-100%: 520K records</div>
-                                                <div>95-99%: 124K records</div>
-                                                <div>90-95%: 30K records</div>
+                                        <h3 className="text-[13px] font-medium text-foreground mb-3">
+                                          What happened in this run
+                                        </h3>
+                                        {/* Records processed this run */}
+                                        <div className="mb-4">
+                                          <div className="text-[11px] text-foreground/50 uppercase tracking-wide mb-2">Processed this run · 468,160 records</div>
+                                          <div className="space-y-2">
+                                            <div className="flex items-center justify-between text-[12px]">
+                                              <div className="flex items-center gap-2">
+                                                <Check className="size-3 text-[#059669]" strokeWidth={2} />
+                                                <span className="text-foreground/80">Low-risk cleanup — auto-resolved</span>
                                               </div>
-                                            )}
-                                          </div>
-                                          <div>
-                                            <div className="text-[24px] font-medium text-foreground">28,340</div>
-                                            <div className="text-[11px] text-foreground/70 mb-1">Processed via policy</div>
-                                            {showConfidenceBreakdown && (
-                                              <div className="space-y-0.5 text-[10px] text-foreground/60">
-                                                <div>95-100%: 18,340 merged</div>
-                                                <div>85-94%: 8,100 flagged</div>
-                                                <div>&lt;85%: 1,900 skipped</div>
+                                              <div className="flex items-center gap-2">
+                                                <span className="text-foreground font-medium">456,000</span>
+                                                <span className="px-1.5 py-0.5 bg-[#d1fae5] text-[#059669] text-[10px] font-medium rounded">Applied</span>
                                               </div>
-                                            )}
-                                          </div>
-                                          <div>
-                                            <div className="text-[24px] font-medium text-[#d97706]">780</div>
-                                            <div className="text-[11px] text-foreground/70 mb-1">Awaiting review</div>
-                                            {showConfidenceBreakdown && (
-                                              <div className="space-y-0.5 text-[10px] text-[#d97706]">
-                                                <div>High-impact: 480</div>
-                                                <div>Low confidence: 220</div>
-                                                <div>Data conflicts: 80</div>
+                                            </div>
+                                            <div className="flex items-center justify-between text-[12px]">
+                                              <div className="flex items-center gap-2">
+                                                <Check className="size-3 text-[#059669]" strokeWidth={2} />
+                                                <span className="text-foreground/80">Identity conflicts — resolved after your approval</span>
                                               </div>
-                                            )}
-                                          </div>
-                                        </div>
-                                        {showConfidenceBreakdown && (
-                                          <div className="p-3 bg-[#fafafa] rounded border border-border text-[11px] text-foreground/70">
-                                            <div className="font-medium mb-1">Overall confidence distribution:</div>
-                                            <div className="text-[10px]">
-                                              99.9% of auto-resolved records had 90%+ confidence. All low-confidence cases (&lt;85%) were routed to manual review.
+                                              <div className="flex items-center gap-2">
+                                                <span className="text-foreground font-medium">8,240</span>
+                                                <span className="px-1.5 py-0.5 bg-[#d1fae5] text-[#059669] text-[10px] font-medium rounded">Applied</span>
+                                              </div>
+                                            </div>
+                                            <div className="flex items-center justify-between text-[12px]">
+                                              <div className="flex items-center gap-2">
+                                                <Check className="size-3 text-[#059669]" strokeWidth={2} />
+                                                <span className="text-foreground/80">Travel document nationality — resolved after your approval</span>
+                                              </div>
+                                              <div className="flex items-center gap-2">
+                                                <span className="text-foreground font-medium">3,400</span>
+                                                <span className="px-1.5 py-0.5 bg-[#d1fae5] text-[#059669] text-[10px] font-medium rounded">Applied</span>
+                                              </div>
+                                            </div>
+                                            <div className="flex items-center justify-between text-[12px]">
+                                              <div className="flex items-center gap-2">
+                                                <AlertTriangle className="size-3 text-[#d97706]" strokeWidth={2} />
+                                                <span className="text-foreground/80">Minors with incomplete consent — escalated, not modified</span>
+                                              </div>
+                                              <div className="flex items-center gap-2">
+                                                <span className="text-foreground font-medium">520</span>
+                                                <span className="px-1.5 py-0.5 bg-[#fef3c7] text-[#d97706] text-[10px] font-medium rounded">Pending review</span>
+                                              </div>
+                                            </div>
+                                            {/* Flagged sub-patterns from approvals */}
+                                            <div className="flex items-center justify-between text-[12px]">
+                                              <div className="flex items-center gap-2">
+                                                <AlertTriangle className="size-3 text-[#d97706]" strokeWidth={2} />
+                                                <span className="text-foreground/80">Sub-patterns with insufficient confidence — queued for review</span>
+                                              </div>
+                                              <div className="flex items-center gap-2">
+                                                <span className="text-foreground font-medium">5,400</span>
+                                                <span className="px-1.5 py-0.5 bg-[#fef3c7] text-[#d97706] text-[10px] font-medium rounded">Pending review</span>
+                                              </div>
                                             </div>
                                           </div>
-                                        )}
+                                        </div>
+
+                                        {/* Records out of scope */}
+                                        <div className="pt-3 border-t border-border">
+                                          <div className="text-[11px] text-foreground/50 uppercase tracking-wide mb-2">Not in scope for this run · 731,840 records</div>
+                                          <div className="space-y-1.5">
+                                            <div className="flex items-center justify-between text-[12px]">
+                                              <div className="flex items-center gap-2">
+                                                <div className="size-3 rounded-full bg-foreground/20 shrink-0" />
+                                                <span className="text-foreground/60">Booking records — separate remediation run required</span>
+                                              </div>
+                                              <span className="text-foreground/50">~412,000</span>
+                                            </div>
+                                            <div className="flex items-center justify-between text-[12px]">
+                                              <div className="flex items-center gap-2">
+                                                <div className="size-3 rounded-full bg-foreground/20 shrink-0" />
+                                                <span className="text-foreground/60">Cargo &amp; freight records — different schema, not assessed</span>
+                                              </div>
+                                              <span className="text-foreground/50">~198,000</span>
+                                            </div>
+                                            <div className="flex items-center justify-between text-[12px]">
+                                              <div className="flex items-center gap-2">
+                                                <div className="size-3 rounded-full bg-foreground/20 shrink-0" />
+                                                <span className="text-foreground/60">Crew &amp; staff records — excluded from this ruleset</span>
+                                              </div>
+                                              <span className="text-foreground/50">~121,840</span>
+                                            </div>
+                                          </div>
+                                        </div>
                                       </div>
 
                                       {/* Operations log */}
@@ -2418,68 +2957,31 @@ export default function App() {
                                           ) : (
                                             <ChevronRight className="size-4" strokeWidth={2} />
                                           )}
-                                          <span>Activity log (15 events)</span>
+                                          <span>Activity log ({activityLog.length} event{activityLog.length !== 1 ? 's' : ''})</span>
                                         </button>
                                         {showActivityLog ? (
-                                          <div className="space-y-2 ml-6">
-                                            <div className="flex items-start gap-3 text-[11px]">
-                                              <span className="text-foreground/40 shrink-0 w-12">14:32</span>
-                                              <div className="flex items-center justify-between flex-1">
-                                                <div className="flex items-center gap-2">
-                                                  <CheckCircle className="size-3 text-[#059669]" strokeWidth={2} />
-                                                  <span className="text-foreground/70">Remediation complete</span>
+                                          <div className="space-y-2 ml-2">
+                                            {activityLog.length === 0 && (
+                                              <div className="text-[11px] text-foreground/40 ml-4">No events yet</div>
+                                            )}
+                                            {activityLog.map(entry => (
+                                              <div key={entry.id} className="flex items-start gap-3 text-[11px]">
+                                                <span className="text-foreground/40 shrink-0 w-12 pt-px">{formatTime(entry.time)}</span>
+                                                <div className="flex items-center gap-2 flex-1">
+                                                  {entry.variant === 'start' && <Play className="size-3 text-foreground/40 shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'stream' && <CheckCircle className="size-3 text-[#059669] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'decision' && <AlertTriangle className="size-3 text-[#d97706] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'approve' && <Check className="size-3 text-[#059669] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'skip' && <SkipForward className="size-3 text-foreground/40 shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'block' && <Pause className="size-3 text-[#d97706] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'resume' && <Play className="size-3 text-[#3b82f6] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'complete' && <CheckCircle className="size-3 text-[#059669] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'error' && <AlertTriangle className="size-3 text-[#dc2626] shrink-0" strokeWidth={2} />}
+                                                  {entry.variant === 'progress' && <Activity className="size-3 text-[#3b82f6] shrink-0" strokeWidth={2} />}
+                                                  <span className="text-foreground/70">{entry.text}</span>
                                                 </div>
-                                                <span className="px-2 py-0.5 bg-[#d1fae5] text-[#059669] text-[10px] font-medium rounded">Done</span>
                                               </div>
-                                            </div>
-                                            <div className="flex items-start gap-3 text-[11px]">
-                                              <span className="text-foreground/40 shrink-0 w-12">14:15</span>
-                                              <div className="flex items-center justify-between flex-1">
-                                                <div className="flex items-center gap-2">
-                                                  <Check className="size-3 text-[#059669]" strokeWidth={2} />
-                                                  <span className="text-foreground/70">Duplicate profile merge complete</span>
-                                                </div>
-                                                <span className="px-2 py-0.5 bg-[#d1fae5] text-[#059669] text-[10px] font-medium rounded">Done</span>
-                                              </div>
-                                            </div>
-                                            <div className="flex items-start gap-3 text-[11px]">
-                                              <span className="text-foreground/40 shrink-0 w-12">13:48</span>
-                                              <div className="flex items-center gap-2 flex-1">
-                                                <Check className="size-3 text-[#3b82f6]" strokeWidth={2} />
-                                                <span className="text-foreground/70">Policy approved: Merge duplicate profiles</span>
-                                              </div>
-                                            </div>
-                                            <div className="flex items-start gap-3 text-[11px]">
-                                              <span className="text-foreground/40 shrink-0 w-12">13:15</span>
-                                              <div className="flex items-center gap-2 flex-1">
-                                                <Pause className="size-3 text-[#d97706]" strokeWidth={2} />
-                                                <span className="text-foreground/70">Paused for decision: Duplicate profiles pattern</span>
-                                              </div>
-                                            </div>
-                                            <div className="flex items-start gap-3 text-[11px]">
-                                              <span className="text-foreground/40 shrink-0 w-12">12:45</span>
-                                              <div className="flex items-center justify-between flex-1">
-                                                <div className="flex items-center gap-2">
-                                                  <Check className="size-3 text-[#059669]" strokeWidth={2} />
-                                                  <span className="text-foreground/70">Low-risk processing complete</span>
-                                                </div>
-                                                <span className="px-2 py-0.5 bg-[#d1fae5] text-[#059669] text-[10px] font-medium rounded">Done</span>
-                                              </div>
-                                            </div>
-                                            <div className="flex items-start gap-3 text-[11px]">
-                                              <span className="text-foreground/40 shrink-0 w-12">11:00</span>
-                                              <div className="flex items-center gap-2 flex-1">
-                                                <Check className="size-3 text-[#059669]" strokeWidth={2} />
-                                                <span className="text-foreground/70">Started: Processing low-risk rules</span>
-                                              </div>
-                                            </div>
-                                            <div className="flex items-start gap-3 text-[11px]">
-                                              <span className="text-foreground/40 shrink-0 w-12">10:45</span>
-                                              <div className="flex items-center gap-2 flex-1">
-                                                <Play className="size-3 text-[#3b82f6]" strokeWidth={2} />
-                                                <span className="text-foreground/70">Agent initialized</span>
-                                              </div>
-                                            </div>
+                                            ))}
                                           </div>
                                         ) : (
                                           <div className="space-y-1.5">
@@ -2561,62 +3063,61 @@ export default function App() {
                                         )}
                                       </div>
 
-                                      {/* Preview unresolved cases */}
-                                      <div className="p-5 border-b border-border bg-[#fffbeb]">
-                                        <button
-                                          onClick={() => setShowActivityLog(!showActivityLog)}
-                                          className="flex items-center gap-2 text-[13px] font-medium text-foreground mb-3 hover:text-foreground/80"
-                                        >
-                                          {showActivityLog ? (
-                                            <ChevronDown className="size-4" strokeWidth={2} />
-                                          ) : (
-                                            <ChevronRight className="size-4" strokeWidth={2} />
-                                          )}
-                                          <span>Preview unresolved cases (780 records)</span>
-                                        </button>
-                                        {showActivityLog && (
-                                          <div className="ml-6">
-                                            <div className="text-[11px] text-foreground/60 mb-3">Showing 3 examples:</div>
-                                            <div className="space-y-2">
-                                              <div className="flex items-start gap-2 text-[12px]">
-                                                <Shield className="size-3.5 text-[#dc2626] mt-0.5 shrink-0" strokeWidth={2} />
-                                                <div>
-                                                  <span className="text-foreground font-medium">Conflicting identity:</span>
-                                                  <span className="text-foreground/70 ml-1">Sarah Chen has 2 DOBs across systems</span>
-                                                </div>
+                                      {/* Post-completion actions */}
+                                      <div className="p-5">
+                                        <div className="text-[11px] text-foreground/50 uppercase tracking-wide mb-3">What would you like to do next?</div>
+                                        <div className="space-y-2">
+                                          {/* Review pending cases — most urgent */}
+                                          <button
+                                            onClick={() => setShowSampleModal(true)}
+                                            className="w-full flex items-center justify-between px-4 py-3 rounded border border-[#d97706]/40 bg-[#fffbeb] hover:bg-[#fef3c7] transition-colors text-left group"
+                                          >
+                                            <div className="flex items-center gap-3">
+                                              <div className="size-7 rounded bg-[#d97706]/10 flex items-center justify-center shrink-0">
+                                                <AlertTriangle className="size-3.5 text-[#d97706]" strokeWidth={2} />
                                               </div>
-                                              <div className="flex items-start gap-2 text-[12px]">
-                                                <Shield className="size-3.5 text-[#dc2626] mt-0.5 shrink-0" strokeWidth={2} />
-                                                <div>
-                                                  <span className="text-foreground font-medium">Missing critical data:</span>
-                                                  <span className="text-foreground/70 ml-1">Booking #847392 has no passenger name</span>
-                                                </div>
-                                              </div>
-                                              <div className="flex items-start gap-2 text-[12px]">
-                                                <Shield className="size-3.5 text-[#dc2626] mt-0.5 shrink-0" strokeWidth={2} />
-                                                <div>
-                                                  <span className="text-foreground font-medium">Source conflict:</span>
-                                                  <span className="text-foreground/70 ml-1">Loyalty tier differs between CRM and booking</span>
-                                                </div>
+                                              <div>
+                                                <div className="text-[13px] font-medium text-foreground">Review pending cases</div>
+                                                <div className="text-[11px] text-foreground/60">5,920 records need a human decision before changes can be applied</div>
                                               </div>
                                             </div>
-                                          </div>
-                                        )}
-                                      </div>
+                                            <ChevronRight className="size-4 text-foreground/30 group-hover:text-foreground/60 transition-colors shrink-0" strokeWidth={2} />
+                                          </button>
 
-                                      {/* Action */}
-                                      <div className="p-5">
-                                        <button
-                                          className="px-5 py-2.5 text-white rounded text-[13px] font-medium transition-all hover:shadow-md"
-                                          style={{
-                                            background: 'linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%)'
-                                          }}
-                                        >
-                                          <div className="flex items-center gap-2">
-                                            <Eye className="size-4" strokeWidth={2} />
-                                            <span>Review edge case patterns (780)</span>
-                                          </div>
-                                        </button>
+                                          {/* Download full change report */}
+                                          <button
+                                            onClick={() => setShowSampleModal(true)}
+                                            className="w-full flex items-center justify-between px-4 py-3 rounded border border-border hover:bg-muted/50 transition-colors text-left group"
+                                          >
+                                            <div className="flex items-center gap-3">
+                                              <div className="size-7 rounded bg-muted flex items-center justify-center shrink-0">
+                                                <FileText className="size-3.5 text-foreground/60" strokeWidth={2} />
+                                              </div>
+                                              <div>
+                                                <div className="text-[13px] font-medium text-foreground">Download change report</div>
+                                                <div className="text-[11px] text-foreground/60">Full audit trail — every change with timestamp, confidence score, and rule applied</div>
+                                              </div>
+                                            </div>
+                                            <ChevronRight className="size-4 text-foreground/30 group-hover:text-foreground/60 transition-colors shrink-0" strokeWidth={2} />
+                                          </button>
+
+                                          {/* View cleaned dataset */}
+                                          <button
+                                            onClick={() => setShowSampleModal(true)}
+                                            className="w-full flex items-center justify-between px-4 py-3 rounded border border-border hover:bg-muted/50 transition-colors text-left group"
+                                          >
+                                            <div className="flex items-center gap-3">
+                                              <div className="size-7 rounded bg-muted flex items-center justify-center shrink-0">
+                                                <Database className="size-3.5 text-foreground/60" strokeWidth={2} />
+                                              </div>
+                                              <div>
+                                                <div className="text-[13px] font-medium text-foreground">View dataset</div>
+                                                <div className="text-[11px] text-foreground/60">Browse the passenger master record with changes applied and diffs highlighted</div>
+                                              </div>
+                                            </div>
+                                            <ChevronRight className="size-4 text-foreground/30 group-hover:text-foreground/60 transition-colors shrink-0" strokeWidth={2} />
+                                          </button>
+                                        </div>
                                       </div>
                                     </>
                                   )}
