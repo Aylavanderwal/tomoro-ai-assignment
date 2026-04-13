@@ -154,41 +154,34 @@ const STREAMS: StreamDef[] = [
   { id: 'minor-consent', label: 'Minors with incomplete consent records', description: 'Minor data compliance · 520 records', records: 520, decisionLabel: 'Minors with incomplete consent records', speed: 0.3 },
 ];
 
-type TourStep = { id: string; anchor: string; text: string };
+type TourStep = { id: string; text: string };
 const TOUR_STEPS: TourStep[] = [
   {
     id: 'idle',
-    anchor: 'tour-passenger-row',
-    text: "This demo simulates the day-to-day workflow of a Data Operations Lead working in a data asset management platform for an airline. The passenger master record has been flagged for remediation — click the row to see what the AI agent has prepared before touching a single record.",
+    text: "This demo simulates the day-to-day workflow of a Data Operations Lead working in a data asset management platform for an airline. The passenger master record has been flagged for remediation. Click the row to see what the AI agent has prepared before touching a single record.",
   },
   {
     id: 'proposed',
-    anchor: 'tour-proposed-actions',
     text: "Before starting, the agent surfaces its full approach: which records it can clean at high confidence, where it expects to pause for a decision, and an estimated runtime. Any changes can be rolled back up to 30 days. Review the plan, then approve to begin.",
   },
   {
     id: 'adjust-rules',
-    anchor: 'tour-adjust-rules',
     text: "Each auto-clean rule can be toggled off if it conflicts with the organisation's policy or current risk appetite. The human stays in full control of what the agent is and is not permitted to do autonomously.",
   },
   {
     id: 'running',
-    anchor: 'tour-stream-progress',
     text: "Once approved, the agent begins processing, starting with the lowest-risk rules first. Every action is logged in real time with per-stream progress. Whether the user watches the full run or returns later, the system's state is always legible.",
   },
   {
     id: 'blocked',
-    anchor: 'tour-decision-queue',
     text: "The agent has paused this stream and is waiting for your input. Other streams are still running. Open the decision card below to review the edge case and choose how to proceed.",
   },
   {
     id: 'sub-patterns',
-    anchor: 'tour-sub-patterns',
     text: "Each pattern breaks into sub-patterns with individual confidence levels and examples. Approve the full set, or disable the ones you would rather handle manually before submitting.",
   },
   {
     id: 'completed',
-    anchor: 'tour-completion-summary',
     text: "The run is complete. This panel shows exactly what was processed, what fell outside scope, and what still needs a human decision. Use the actions below to review pending cases, download the audit trail, or browse the cleaned dataset.",
   },
 ];
@@ -250,55 +243,65 @@ export default function App() {
   }, []);
   // Tour overlay state
   const [tourVisible, setTourVisible] = useState<boolean>(false);
-  const [tourPhase, setTourPhase] = useState<'in' | 'hold' | 'out'>('in');
-  const [tourText, setTourText] = useState<string>('');
-  const [tourTop, setTourTop] = useState<number>(0);
+  const [tourFading, setTourFading] = useState<boolean>(false);
+  const [tourWords, setTourWords] = useState<string[]>([]);
+  const [tourKey, setTourKey] = useState<number>(0); // bumped to re-trigger word animation
+  const [tourDragPos, setTourDragPos] = useState<{ x: number; y: number } | null>(null);
   const shownTourSteps = useRef<Set<string>>(new Set());
-  const tourQueueRef = useRef<string[]>([]);
-  const tourBusyRef = useRef<boolean>(false);
+  const tourTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const dragStateRef = useRef<{ dragging: boolean; moved: boolean; startX: number; startY: number; posX: number; posY: number }>({ dragging: false, moved: false, startX: 0, startY: 0, posX: 0, posY: 0 });
   const [profileImgError, setProfileImgError] = useState<boolean>(false);
 
-  const computeTourTop = (anchorId: string): number => {
-    const el = document.querySelector(`[data-tour-anchor="${anchorId}"]`);
-    if (!el) return window.innerHeight - 160;
-    const rect = el.getBoundingClientRect();
-    const bubbleH = 120;
-    return Math.max(16, Math.min(rect.top + rect.height / 2 - bubbleH / 2, window.innerHeight - bubbleH - 16));
-  };
-
-  const runTourStep = useCallback((text: string, anchor: string) => {
-    tourBusyRef.current = true;
-    setTourTop(computeTourTop(anchor));
-    setTourText(text);
-    setTourPhase('in');
-    setTourVisible(true);
-    const readMs = Math.max(9000, text.length * 63);
-    setTimeout(() => setTourPhase('hold'), 350);
-    setTimeout(() => {
-      setTourPhase('out');
-      setTimeout(() => {
-        setTourVisible(false);
-        tourBusyRef.current = false;
-        const next = tourQueueRef.current.shift();
-        if (next) {
-          const step = TOUR_STEPS.find(s => s.id === next);
-          if (step) setTimeout(() => runTourStep(step.text, step.anchor), 300);
-        }
-      }, 400);
-    }, 350 + readMs);
+  const clearTourTimers = useCallback(() => {
+    tourTimeoutsRef.current.forEach(clearTimeout);
+    tourTimeoutsRef.current = [];
   }, []);
+
+  const dismissTour = useCallback(() => {
+    clearTourTimers();
+    setTourFading(true);
+    const t = setTimeout(() => { setTourVisible(false); setTourFading(false); }, 350);
+    tourTimeoutsRef.current.push(t);
+  }, [clearTourTimers]);
+
+  const runTourStep = useCallback((text: string) => {
+    clearTourTimers();
+    setTourFading(false);
+    setTourWords(text.split(' '));
+    setTourKey(k => k + 1);
+    setTourVisible(true);
+    const wordCount = text.split(' ').length;
+    const allWordsMs = wordCount * 70 + 200;
+    const holdMs = Math.max(7000, allWordsMs + 3500);
+    const t = setTimeout(() => dismissTour(), holdMs);
+    tourTimeoutsRef.current.push(t);
+  }, [clearTourTimers, dismissTour]);
 
   const showTourStep = useCallback((stepId: string) => {
     if (shownTourSteps.current.has(stepId)) return;
     shownTourSteps.current.add(stepId);
     const step = TOUR_STEPS.find(s => s.id === stepId);
     if (!step) return;
-    if (tourBusyRef.current) {
-      tourQueueRef.current.push(stepId);
-    } else {
-      runTourStep(step.text, step.anchor);
-    }
+    runTourStep(step.text);
   }, [runTourStep]);
+
+  // Drag handlers
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!dragStateRef.current.dragging) return;
+      const dx = e.clientX - dragStateRef.current.startX;
+      const dy = e.clientY - dragStateRef.current.startY;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) dragStateRef.current.moved = true;
+      setTourDragPos({
+        x: Math.max(0, Math.min(dragStateRef.current.posX + dx, window.innerWidth - 380)),
+        y: Math.max(0, Math.min(dragStateRef.current.posY + dy, window.innerHeight - 100)),
+      });
+    };
+    const onUp = () => { dragStateRef.current.dragging = false; };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+  }, []);
 
   // Refs to detect transitions
   const prevAgentStateRef = useRef<string>('proposed');
@@ -1211,27 +1214,36 @@ export default function App() {
   return (
     <div className="h-screen flex bg-[#fafafa]">
       {/* Tour voiceover bubble */}
+      <style>{`@keyframes twFadeWord { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }`}</style>
       {tourVisible && (
         <div
-          className="fixed left-5 z-[70] flex items-center gap-3 pointer-events-none"
+          className="fixed z-[70] flex items-end gap-3 cursor-grab active:cursor-grabbing select-none"
           style={{
-            top: tourTop,
-            opacity: tourPhase === 'hold' ? 1 : 0,
-            transform: tourPhase === 'in' ? 'translateX(-10px)' : 'translateX(0)',
-            transition: tourPhase === 'out'
-              ? 'opacity 400ms ease-in'
-              : 'opacity 350ms ease-out, transform 350ms ease-out',
+            left: tourDragPos ? tourDragPos.x : 20,
+            bottom: tourDragPos ? 'auto' : 24,
+            top: tourDragPos ? tourDragPos.y : 'auto',
+            opacity: tourFading ? 0 : 1,
+            transition: tourFading ? 'opacity 350ms ease-in' : 'opacity 250ms ease-out',
+          }}
+          onMouseDown={e => {
+            dragStateRef.current = {
+              dragging: true,
+              moved: false,
+              startX: e.clientX,
+              startY: e.clientY,
+              posX: tourDragPos?.x ?? 20,
+              posY: tourDragPos?.y ?? (window.innerHeight - 24 - 120),
+            };
+            e.preventDefault();
+          }}
+          onClick={() => {
+            if (!dragStateRef.current.moved) dismissTour();
           }}
         >
           {/* Avatar */}
           <div className="size-10 rounded-full overflow-hidden border-2 border-white shadow-lg shrink-0 bg-[#1e293b] flex items-center justify-center">
             {!profileImgError ? (
-              <img
-                src="/profile.jpg"
-                alt="Ayla"
-                className="size-full object-cover"
-                onError={() => setProfileImgError(true)}
-              />
+              <img src="/profile.jpg" alt="Ayla" className="size-full object-cover" onError={() => setProfileImgError(true)} />
             ) : (
               <span className="text-[13px] font-semibold text-white select-none">AW</span>
             )}
@@ -1239,17 +1251,25 @@ export default function App() {
 
           {/* Bubble */}
           <div
-            className="relative max-w-[320px] rounded-2xl rounded-tl-sm px-4 py-3 shadow-xl"
+            className="relative max-w-[300px] rounded-2xl rounded-bl-sm px-4 py-3 shadow-xl"
             style={{ background: '#1e293b' }}
           >
-            {/* Tail pointing left toward avatar */}
-            <div
-              className="absolute -left-1.5 top-4 size-3 rotate-45 rounded-sm"
-              style={{ background: '#1e293b' }}
-            />
+            <div className="absolute -left-1.5 bottom-4 size-3 rotate-45 rounded-sm" style={{ background: '#1e293b' }} />
             <p className="text-[12.5px] leading-relaxed text-white/90 relative z-10">
-              {tourText}
+              {tourWords.map((word, i) => (
+                <span
+                  key={`${tourKey}-${i}`}
+                  style={{
+                    display: 'inline',
+                    opacity: 0,
+                    animation: `twFadeWord 200ms ease forwards ${i * 70}ms`,
+                  }}
+                >
+                  {word}{i < tourWords.length - 1 ? ' ' : ''}
+                </span>
+              ))}
             </p>
+            <div className="mt-2 text-[10px] text-white/25 text-right">click to dismiss</div>
           </div>
         </div>
       )}
