@@ -67,9 +67,8 @@ type SubPattern = {
 const DECISION_SUB_PATTERNS: Record<string, SubPattern[]> = {
   'Conflicting identity — no shared key': [
     { records: 2840, confidenceLabel: '91%', confidenceColor: 'text-[#059669]', confidenceBg: 'bg-[#d1fae5]', signal: 'Name romanisation variant across PNR systems', action: 'Merge · standardise to passport-verified spelling', detail: 'The same traveller appears in Amadeus as "Mohammed Al-Rashidi" and in Sabre as "Mohammad Alrashidy" — a transliteration difference, not a different person. DOB and route history match exactly. The agent identified this as a romanisation variant using multilingual name normalisation; a deterministic rule would have rejected the match due to Levenshtein distance above threshold.', example: ['Amadeus: "Al-Rashidi, M"', 'Sabre: "Alrashidy, Mohammad"'] },
-    { records: 2190, confidenceLabel: '84%', confidenceColor: 'text-[#059669]', confidenceBg: 'bg-[#d1fae5]', signal: 'Overlapping flight routes + hotel redemption, no field match', action: 'Flag for human review · strong behavioural signal', detail: 'No individual field matches with confidence above 65%: names differ (first-name variant), DOBs differ by 2 years, email domains differ. However, the agent identified 4 overlapping LHR–DXB booking windows, the same hotel loyalty number across 3 stays, and a shared GDS device fingerprint. Reasoning across flight, hotel, and session data simultaneously is not expressible as a rule.', example: ['Field match: none ≥65%', 'Behavioural: 84% · flag for review'] },
-    { records: 1870, confidenceLabel: '76%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'CS note links orphaned PNR to loyalty profile via maiden name', action: 'Flag as likely same person · human confirmation required', detail: 'The agent read a free-text customer service note on the orphaned profile: "customer mentioned booking under maiden name before marriage — please link to current account." Candidate match has a matching DOB and phone number but a different surname. Understanding the intent of an unstructured note and applying it across a name change is not possible with rule-based deduplication.', example: ['CS note: "old account, maiden name"', 'Candidate: same DOB + phone → 76%'] },
-    { records: 1340, confidenceLabel: '72%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'Identity chain: A=B, B=C, but A≠C directly', action: 'Flag identity cluster · chain confidence below merge threshold', detail: 'PNR record A matches CRM record B at 88% (shared email + DOB). CRM record B matches loyalty record C at 91% (shared phone + address). However, PNR A and loyalty C share no direct field, making the chain confidence 72% — below the merge threshold. The agent surfaced this multi-hop inference; a rule engine cannot reason about transitive identity links across systems.', example: ['A↔B: 88%, B↔C: 91%', 'Chain A↔C: 72% · needs review'] },
+    { records: 2190, confidenceLabel: '84%', confidenceColor: 'text-[#059669]', confidenceBg: 'bg-[#d1fae5]', signal: 'Overlapping flight routes + hotel redemption, no field match', action: 'Flag for human review · strong behavioural signal, no field match', detail: 'No individual field matches with confidence above 65%: names differ (first-name variant), DOBs differ by 2 years, email domains differ. However, the agent identified 4 overlapping LHR–DXB booking windows, the same hotel loyalty number across 3 stays, and a shared GDS device fingerprint. Confidence is strong enough to surface but not to merge automatically — flagged for staff confirmation.', example: ['Field match: none ≥65%', 'Behavioural: 84% · flag for review'] },
+    { records: 3210, confidenceLabel: '76%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'CS note links orphaned PNR to loyalty profile via maiden name', action: 'Flag as likely same person · human confirmation required', detail: 'The agent read a free-text customer service note on the orphaned profile: "customer mentioned booking under maiden name before marriage — please link to current account." Candidate match has a matching DOB and phone number but a different surname. Confidence is below the auto-merge threshold — flagged for a staff member to confirm the link before any records are written.', example: ['CS note: "old account, maiden name"', 'Candidate: same DOB + phone → 76%'] },
   ],
   'Travel document nationality ambiguity': [
     { records: 1240, confidenceLabel: '84%', confidenceColor: 'text-[#059669]', confidenceBg: 'bg-[#d1fae5]', signal: 'Stateless travel document + consistent booking origin', action: 'Infer nationality from 5-year booking history · flag for review', detail: 'The passenger holds a stateless travel document (Convention Travel Document), which carries no nationality field. The agent inferred likely nationality from 5 years of bookings consistently originating from the same country, combined with a billing address and loyalty registration address in the same country. A rule cannot process stateless documents — it has no nationality field to read.', example: ['Document: stateless (CTD)', 'Inferred: "DEU" from booking history → 84%'] },
@@ -87,28 +86,27 @@ const DECISION_SUB_PATTERNS: Record<string, SubPattern[]> = {
 
 const DECISION_OUTCOMES: Record<string, { headline: string; lines: { variant: 'applied' | 'flagged' | 'escalated'; text: string }[] }> = {
   'Conflicting identity — no shared key': {
-    headline: '8,240 records processed — stream resumed',
+    headline: '8,240 records reviewed — processing resumed',
     lines: [
       { variant: 'applied', text: '2,840 records merged · romanisation variants resolved to passport-verified spelling' },
       { variant: 'flagged', text: '2,190 records queued for human review · strong behavioural signal but no field match' },
-      { variant: 'flagged', text: '1,870 records flagged as likely same person · maiden name change, awaiting staff confirmation' },
-      { variant: 'flagged', text: '1,340 records isolated · multi-hop identity chain confidence below merge threshold' },
+      { variant: 'flagged', text: '3,210 records flagged as likely same person · maiden name change, awaiting staff confirmation' },
     ],
   },
   'Travel document nationality ambiguity': {
-    headline: '3,400 records processed — stream resumed',
+    headline: '3,400 records reviewed — flagged for human decision',
     lines: [
-      { variant: 'applied', text: '1,240 records: nationality inferred from booking history and address signals, flagged for review' },
-      { variant: 'flagged', text: '980 records: temporal conflict noted · 2016 visa vs. current booking origin, logged for decision' },
-      { variant: 'flagged', text: '730 records: dual nationality detected in CS notes · policy gap logged, no field written' },
-      { variant: 'escalated', text: '450 records: refugee travel documents escalated to compliance team, no auto-backfill' },
+      { variant: 'flagged', text: '1,240 records: nationality inferred from booking history · flagged for staff confirmation before any field is written' },
+      { variant: 'flagged', text: '980 records: temporal conflict between 2016 visa and current booking origin · policy decision required' },
+      { variant: 'flagged', text: '730 records: dual nationality in CS notes · schema supports one value, policy gap logged' },
+      { variant: 'escalated', text: '450 records: refugee travel documents · escalated to compliance, no auto-backfill permitted' },
     ],
   },
   'Minors with incomplete consent records': {
-    headline: '520 records isolated — escalated to data governance team',
+    headline: '520 records isolated — escalated to data governance, none auto-processed',
     lines: [
       { variant: 'escalated', text: '184 records: hold placed · self-registered under-16 accounts, guardian verification required (GDPR Art. 8)' },
-      { variant: 'escalated', text: '142 records: cannot process · no adult contact linked, sent to airport operations team' },
+      { variant: 'escalated', text: '142 records: no adult contact on record · sent to airport operations team, cannot proceed' },
       { variant: 'escalated', text: '118 records: consent lapsed · outreach queued to guardian on file for renewal' },
       { variant: 'escalated', text: '76 records: age ambiguous across systems · staff must confirm from verified travel document' },
     ],
@@ -170,7 +168,7 @@ const TOUR_STEPS: TourStep[] = [
   },
   {
     id: 'running',
-    text: "The agent is now processing the passenger master record, starting with the safest and most confident changes first. Every action is logged in the activity panel in real time so you can always see exactly what is being applied and why. To see how the agent handles a complex edge case that requires your input, click Block agent in the test controls panel on the right.",
+    text: "The agent is now processing the passenger master record, starting with the safest and most confident changes first. Every action is logged in the activity panel in real time so you can always see what is being applied and why. When it reaches a pattern it cannot resolve automatically, it will pause and surface it for your input. Click Block agent in the test controls panel on the right to see that happen.",
   },
   {
     id: 'running-nudge-block',
@@ -194,7 +192,7 @@ const TOUR_STEPS: TourStep[] = [
   },
   {
     id: 'blocked',
-    text: "The agent has encountered an identity or classification pattern it cannot resolve within its confidence threshold and has surfaced it for your review. Notice that other processing is continuing in the background. Only this specific pattern is paused, keeping the rest of the remediation moving forward. Scroll down to the decision card to review the edge case and approve or skip.",
+    text: "The agent has reached a pattern it cannot resolve within its confidence threshold and has paused. No further records are written until you decide. Scroll down to the decision card to review the case, see the agent's reasoning, and approve or skip.",
   },
   {
     id: 'sub-patterns',
@@ -504,7 +502,7 @@ export default function App() {
     } else if (agentState === 'blocked') {
       addLog({ variant: 'block', text: 'Agent blocked · processed all safe work · waiting for decisions' });
     } else if (prev === 'blocked' && agentState === 'running') {
-      addLog({ variant: 'resume', text: 'Agent resumed · unblocked stream now processing' });
+      addLog({ variant: 'resume', text: 'Agent resumed · processing continuing from checkpoint' });
     } else if (agentState === 'completed') {
       addLog({ variant: 'complete', text: 'Run complete · all records processed' });
     } else if (agentState === 'failed') {
@@ -1992,7 +1990,7 @@ export default function App() {
                                                 Agent still running — {pendingDecisions.length} decision{pendingDecisions.length > 1 ? 's' : ''} queued while you were away
                                               </div>
                                               <div className="text-[12px] text-foreground/60">
-                                                Other streams are continuing · Queued decisions need your review
+                                                Queued decisions need your review before processing can continue
                                               </div>
                                             </div>
                                           </div>
@@ -2066,7 +2064,7 @@ export default function App() {
                                           {agentState === 'completed' && (
                                             <div className="flex items-start gap-3 text-[12px]">
                                               <CheckCircle className="size-3.5 text-[#059669] mt-0.5 shrink-0" strokeWidth={2} />
-                                              <span className="text-foreground/80">All streams finished — run completed successfully</span>
+                                              <span className="text-foreground/80">All records processed — run completed successfully</span>
                                             </div>
                                           )}
                                         </div>
@@ -2322,8 +2320,8 @@ export default function App() {
                                           <div className="size-2 rounded-full bg-[#3b82f6] animate-pulse" />
                                           <h3 className="text-[14px] font-medium text-foreground">
                                             {pendingDecisions.length > 0
-                                              ? `Agent running — ${STREAMS.filter(s => getStreamStatus(s) === 'blocked').length} stream${STREAMS.filter(s => getStreamStatus(s) === 'blocked').length > 1 ? 's' : ''} paused, ${STREAMS.filter(s => getStreamStatus(s) === 'running').length} active`
-                                              : 'Agent running — processing all streams'
+                                              ? `Agent running — ${pendingDecisions.length} decision${pendingDecisions.length > 1 ? 's' : ''} queued`
+                                              : 'Agent running'
                                             }
                                           </h3>
                                         </div>
@@ -2332,64 +2330,15 @@ export default function App() {
                                         </div>
                                       </div>
 
-                                      {/* Progress — per-stream breakdown */}
+                                      {/* Progress */}
                                       <div className="p-5 border-b border-border">
-                                        {/* Overall bar */}
                                         <div className="flex items-center justify-between mb-1.5">
-                                          <span className="text-[12px] font-medium text-foreground">Overall progress</span>
+                                          <span className="text-[12px] font-medium text-foreground">Progress</span>
                                           <span className="text-[12px] text-foreground/70">{Math.round(progress * 10) / 10}%</span>
                                         </div>
-                                        <div className="h-1.5 bg-[#e5e7eb] rounded-full overflow-hidden mb-4">
+                                        <div className="h-1.5 bg-[#e5e7eb] rounded-full overflow-hidden">
                                           <div className="h-full bg-[#3b82f6] transition-all duration-500" style={{ width: `${Math.round(progress * 10) / 10}%` }} />
                                         </div>
-                                        {/* Stream breakdown — only shown once medium-risk patterns have been surfaced */}
-                                        {visibleStreams.length > 1 && (
-                                        <div className="space-y-2.5" data-tour-anchor="tour-stream-progress">
-                                          {visibleStreams.map(stream => {
-                                            const sp = Math.round(streamProgress[stream.id]);
-                                            const status = getStreamStatus(stream);
-                                            const resolvedDecision = stream.decisionLabel
-                                              ? decisions.find(d => d.label === stream.decisionLabel && d.status !== 'pending')
-                                              : null;
-                                            return (
-                                              <div key={stream.id} className="flex items-center gap-2.5">
-                                                <div className="w-40 shrink-0 flex items-center gap-1.5">
-                                                  {status === 'completed'
-                                                    ? <CheckCircle className="size-3 text-[#059669] shrink-0" strokeWidth={2} />
-                                                    : status === 'blocked'
-                                                      ? <Pause className="size-3 text-[#d97706] shrink-0" strokeWidth={2} />
-                                                      : <div className="size-2 rounded-full bg-[#3b82f6] animate-pulse shrink-0" />
-                                                  }
-                                                  <div className="min-w-0">
-                                                    <span className={`text-[11px] font-medium truncate block ${status === 'blocked' ? 'text-[#92400e]' : status === 'completed' ? 'text-foreground/40' : 'text-foreground'}`}>
-                                                      {stream.label}
-                                                    </span>
-                                                    {resolvedDecision && (
-                                                      <span className="text-[10px] text-foreground/35">
-                                                        {resolvedDecision.status === 'approved' ? 'decision applied' : 'skipped'}
-                                                      </span>
-                                                    )}
-                                                  </div>
-                                                </div>
-                                                <div className="flex-1 h-1.5 bg-[#e5e7eb] rounded-full overflow-hidden">
-                                                  <div
-                                                    className={`h-full transition-all duration-500 ${status === 'blocked' ? 'bg-[#d97706]' : status === 'completed' ? 'bg-[#059669]' : 'bg-[#3b82f6]'}`}
-                                                    style={{ width: `${sp}%` }}
-                                                  />
-                                                </div>
-                                                <span className={`text-[11px] w-7 text-right shrink-0 ${status === 'blocked' ? 'text-[#d97706]' : 'text-foreground/40'}`}>{sp}%</span>
-                                                <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0 w-14 text-center ${
-                                                  status === 'completed' ? 'bg-[#d1fae5] text-[#059669]'
-                                                  : status === 'blocked' ? 'bg-[#fef3c7] text-[#d97706]'
-                                                  : 'bg-[#dbeafe] text-[#2563eb]'
-                                                }`}>
-                                                  {status === 'completed' ? 'Done' : status === 'blocked' ? 'Paused' : 'Active'}
-                                                </span>
-                                              </div>
-                                            );
-                                          })}
-                                        </div>
-                                        )}
                                       </div>
 
                                       {/* Current actions */}
@@ -2428,7 +2377,7 @@ export default function App() {
                                             <div className="flex items-center gap-2">
                                               <AlertTriangle className="size-3.5 text-[#d97706]" strokeWidth={2} />
                                               <span className="text-[12px] font-medium text-[#92400e]">
-                                                {pendingDecisions.length} decision{pendingDecisions.length > 1 ? 's' : ''} queued — agent is still processing other records
+                                                {pendingDecisions.length} decision{pendingDecisions.length > 1 ? 's' : ''} queued — review to continue
                                               </span>
                                             </div>
                                             <span className="text-[11px] text-foreground/50">Resolve at your own pace</span>
@@ -2669,43 +2618,14 @@ export default function App() {
                                         </p>
                                       </div>
 
-                                      {/* Progress — stream breakdown frozen at block point */}
+                                      {/* Progress — frozen at block point */}
                                       <div className="p-5 border-b border-border">
                                         <div className="flex items-center justify-between mb-1.5">
-                                          <span className="text-[12px] font-medium text-foreground">Overall progress</span>
-                                          <span className="text-[12px] text-foreground/70">{Math.round(progress * 10) / 10}% — all streams blocked</span>
+                                          <span className="text-[12px] font-medium text-foreground">Progress</span>
+                                          <span className="text-[12px] text-foreground/70">{Math.round(progress * 10) / 10}% — paused</span>
                                         </div>
-                                        <div className="h-1.5 bg-[#e5e7eb] rounded-full overflow-hidden mb-4">
+                                        <div className="h-1.5 bg-[#e5e7eb] rounded-full overflow-hidden">
                                           <div className="h-full bg-[#d97706]" style={{ width: `${Math.round(progress * 10) / 10}%` }} />
-                                        </div>
-                                        <div className="space-y-2.5">
-                                          {visibleStreams.map(stream => {
-                                            const sp = Math.round(streamProgress[stream.id]);
-                                            const status = getStreamStatus(stream);
-                                            return (
-                                              <div key={stream.id} className="flex items-center gap-2.5">
-                                                <div className="w-40 shrink-0 flex items-center gap-1.5">
-                                                  {status === 'completed'
-                                                    ? <CheckCircle className="size-3 text-[#059669] shrink-0" strokeWidth={2} />
-                                                    : <Pause className="size-3 text-[#d97706] shrink-0" strokeWidth={2} />
-                                                  }
-                                                  <span className={`text-[11px] font-medium truncate ${status === 'completed' ? 'text-foreground/40' : 'text-[#92400e]'}`}>
-                                                    {stream.label}
-                                                  </span>
-                                                </div>
-                                                <div className="flex-1 h-1.5 bg-[#e5e7eb] rounded-full overflow-hidden">
-                                                  <div
-                                                    className={`h-full ${status === 'completed' ? 'bg-[#059669]' : 'bg-[#d97706]'}`}
-                                                    style={{ width: `${sp}%` }}
-                                                  />
-                                                </div>
-                                                <span className="text-[11px] w-7 text-right shrink-0 text-foreground/40">{sp}%</span>
-                                                <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0 w-14 text-center ${status === 'completed' ? 'bg-[#d1fae5] text-[#059669]' : 'bg-[#fef3c7] text-[#d97706]'}`}>
-                                                  {status === 'completed' ? 'Done' : 'Blocked'}
-                                                </span>
-                                              </div>
-                                            );
-                                          })}
                                         </div>
                                       </div>
 
