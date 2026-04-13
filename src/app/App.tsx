@@ -1,4 +1,4 @@
-import { useState, Fragment, useEffect, useRef, useCallback } from 'react';
+import { useState, Fragment, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   LayoutDashboard,
   Clock,
@@ -372,15 +372,15 @@ export default function App() {
   // Derived decision state — must be before activeTourStepId
   const pendingDecisions = decisions.filter(d => d.status === 'pending');
   const resolvedDecisionCount = decisions.filter(d => d.status !== 'pending').length;
-  const hasSeenFailureRef = useRef<boolean>(false);
+  const [hasSeenFailure, setHasSeenFailure] = useState<boolean>(false);
 
   // Track when failure state is seen so tour can sequence correctly
   useEffect(() => {
-    if (agentState === 'failed') hasSeenFailureRef.current = true;
+    if (agentState === 'failed') setHasSeenFailure(true);
   }, [agentState]);
 
   // Derive which tour step is relevant right now and swap whenever it changes
-  const activeTourStepId = (() => {
+  const activeTourStepId = useMemo(() => {
     if (showSampleModal) return 'sample-resolutions';
     if (expandedDataset !== 'passenger-master') return 'idle';
     if (agentState === 'proposed') return showAdjustRules ? 'adjust-rules' : 'proposed';
@@ -388,7 +388,7 @@ export default function App() {
     if (agentState === 'running') {
       if (expandedDecisionDetails.size > 0) return 'sub-patterns';
       if (pendingDecisions.length > 0) return 'blocked';
-      if (hasSeenFailureRef.current) return 'running-nudge-complete';
+      if (hasSeenFailure) return 'running-nudge-complete';
       if (resolvedDecisionCount >= 2) return 'running-nudge-failure';
       if (resolvedDecisionCount === 1) return 'running-nudge-block';
       return 'running';
@@ -396,7 +396,7 @@ export default function App() {
     if (agentState === 'blocked') return expandedDecisionDetails.size > 0 ? 'sub-patterns' : 'blocked';
     if (agentState === 'completed') return 'completed';
     return null;
-  })();
+  }, [showSampleModal, expandedDataset, agentState, showAdjustRules, expandedDecisionDetails, pendingDecisions, hasSeenFailure, resolvedDecisionCount]);
 
   useEffect(() => {
     if (!activeTourStepId) return;
@@ -2459,9 +2459,12 @@ export default function App() {
                                                     </div>
                                                     <div className="flex items-center gap-2 shrink-0 ml-4">
                                                       <button
-                                                        onClick={() => setDecisions(prev => prev.map(d =>
-                                                          d.id === decision.id ? { ...d, status: 'skipped', resolvedAt: new Date() } : d
-                                                        ))}
+                                                        onClick={() => {
+                                                          setDecisions(prev => prev.map(d =>
+                                                            d.id === decision.id ? { ...d, status: 'skipped', resolvedAt: new Date() } : d
+                                                          ));
+                                                          setExpandedDecisionDetails(prev => { const next = new Set(prev); next.delete(decision.id); return next; });
+                                                        }}
                                                         className="px-3 py-1.5 text-[12px] text-foreground/60 hover:text-foreground font-medium border border-border rounded hover:bg-accent"
                                                       >
                                                         Skip
@@ -2471,6 +2474,7 @@ export default function App() {
                                                           setDecisions(prev => prev.map(d =>
                                                             d.id === decision.id ? { ...d, status: 'approved', resolvedAt: new Date() } : d
                                                           ));
+                                                          setExpandedDecisionDetails(prev => { const next = new Set(prev); next.delete(decision.id); return next; });
                                                           setUndoCountdown(30);
                                                         }}
                                                         className="px-3 py-1.5 text-[12px] font-medium text-white rounded whitespace-nowrap"
@@ -2772,9 +2776,12 @@ export default function App() {
                                                 </div>
                                                 <div className="flex items-center gap-2 shrink-0">
                                                   <button
-                                                    onClick={() => setDecisions(prev => prev.map(d =>
-                                                      d.id === decision.id ? { ...d, status: 'skipped', resolvedAt: new Date() } : d
-                                                    ))}
+                                                    onClick={() => {
+                                                      setDecisions(prev => prev.map(d =>
+                                                        d.id === decision.id ? { ...d, status: 'skipped', resolvedAt: new Date() } : d
+                                                      ));
+                                                      setExpandedDecisionDetails(prev => { const next = new Set(prev); next.delete(decision.id); return next; });
+                                                    }}
                                                     className="px-3 py-1.5 text-[12px] text-foreground/60 hover:text-foreground font-medium border border-border rounded hover:bg-accent"
                                                   >
                                                     Skip
@@ -2784,6 +2791,7 @@ export default function App() {
                                                       setDecisions(prev => prev.map(d =>
                                                         d.id === decision.id ? { ...d, status: 'approved', resolvedAt: new Date() } : d
                                                       ));
+                                                      setExpandedDecisionDetails(prev => { const next = new Set(prev); next.delete(decision.id); return next; });
                                                       setUndoCountdown(30);
                                                     }}
                                                     className="px-4 py-1.5 text-[12px] font-medium text-white rounded whitespace-nowrap"
