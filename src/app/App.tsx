@@ -154,35 +154,42 @@ const STREAMS: StreamDef[] = [
   { id: 'minor-consent', label: 'Minors with incomplete consent records', description: 'Minor data compliance · 520 records', records: 520, decisionLabel: 'Minors with incomplete consent records', speed: 0.3 },
 ];
 
-type TourStep = { id: string; text: string };
+type TourStep = { id: string; anchor: string; text: string };
 const TOUR_STEPS: TourStep[] = [
   {
     id: 'idle',
-    text: "This demo simulates the day-to-day workflow of a Data Operations Lead working in a data asset management platform for an airline. The passenger master record has been flagged for remediation, and opening it shows what the AI agent has prepared before touching a single record.",
+    anchor: 'tour-passenger-row',
+    text: "This demo simulates the day-to-day workflow of a Data Operations Lead working in a data asset management platform for an airline. The passenger master record has been flagged for remediation — click the row to see what the AI agent has prepared before touching a single record.",
   },
   {
     id: 'proposed',
-    text: "Before starting, the agent runs a preliminary scan and surfaces its full approach: which records it can clean at high confidence, where it expects to pause for a decision, and an estimated runtime. Any changes can be rolled back up to 30 days, giving the operations lead confidence to proceed.",
+    anchor: 'tour-proposed-actions',
+    text: "Before starting, the agent surfaces its full approach: which records it can clean at high confidence, where it expects to pause for a decision, and an estimated runtime. Any changes can be rolled back up to 30 days. Review the plan, then approve to begin.",
   },
   {
     id: 'adjust-rules',
-    text: "The auto-clean rules can be adjusted before the run begins. Each rule can be toggled off if it conflicts with the organisation's policy or the user's current risk appetite. The human stays in full control of what the agent is and is not permitted to do autonomously.",
+    anchor: 'tour-adjust-rules',
+    text: "Each auto-clean rule can be toggled off if it conflicts with the organisation's policy or current risk appetite. The human stays in full control of what the agent is and is not permitted to do autonomously.",
   },
   {
     id: 'running',
-    text: "Once approved, the agent begins processing, starting with the lowest-risk rules first. Every action is logged in real time with per-stream progress. Whether the user watches the full run or returns later, the system's state is always legible and nothing is a black box.",
+    anchor: 'tour-stream-progress',
+    text: "Once approved, the agent begins processing, starting with the lowest-risk rules first. Every action is logged in real time with per-stream progress. Whether the user watches the full run or returns later, the system's state is always legible.",
   },
   {
     id: 'blocked',
-    text: "When the agent encounters an edge case it cannot resolve within its confidence threshold, it pauses only that specific stream and not the full run. Other streams continue uninterrupted. The interruption is proportional to the risk, and the user is called back only when their judgement is genuinely required.",
+    anchor: 'tour-decision-queue',
+    text: "The agent has paused this stream and is waiting for your input. Other streams are still running. Open the decision card below to review the edge case and choose how to proceed.",
   },
   {
     id: 'sub-patterns',
-    text: "Each flagged pattern is broken into sub-patterns, each with its own confidence level and a concrete example. The user can approve the full set or selectively disable sub-patterns they would rather handle manually, giving precise control without disrupting the rest of the run.",
+    anchor: 'tour-sub-patterns',
+    text: "Each pattern breaks into sub-patterns with individual confidence levels and examples. Approve the full set, or disable the ones you would rather handle manually before submitting.",
   },
   {
     id: 'completed',
-    text: "At completion, the summary shows exactly what was processed in this run, what fell outside its scope, and what still requires a human decision. From here, the operations lead can review pending edge cases, download the full audit trail, or browse the cleaned dataset with every change highlighted.",
+    anchor: 'tour-completion-summary',
+    text: "The run is complete. This panel shows exactly what was processed, what fell outside scope, and what still needs a human decision. Use the actions below to review pending cases, download the audit trail, or browse the cleaned dataset.",
   },
 ];
 
@@ -245,13 +252,23 @@ export default function App() {
   const [tourVisible, setTourVisible] = useState<boolean>(false);
   const [tourPhase, setTourPhase] = useState<'in' | 'hold' | 'out'>('in');
   const [tourText, setTourText] = useState<string>('');
+  const [tourTop, setTourTop] = useState<number>(0);
   const shownTourSteps = useRef<Set<string>>(new Set());
   const tourQueueRef = useRef<string[]>([]);
   const tourBusyRef = useRef<boolean>(false);
   const [profileImgError, setProfileImgError] = useState<boolean>(false);
 
-  const runTourStep = useCallback((text: string) => {
+  const computeTourTop = (anchorId: string): number => {
+    const el = document.querySelector(`[data-tour-anchor="${anchorId}"]`);
+    if (!el) return window.innerHeight - 160;
+    const rect = el.getBoundingClientRect();
+    const bubbleH = 120;
+    return Math.max(16, Math.min(rect.top + rect.height / 2 - bubbleH / 2, window.innerHeight - bubbleH - 16));
+  };
+
+  const runTourStep = useCallback((text: string, anchor: string) => {
     tourBusyRef.current = true;
+    setTourTop(computeTourTop(anchor));
     setTourText(text);
     setTourPhase('in');
     setTourVisible(true);
@@ -262,11 +279,10 @@ export default function App() {
       setTimeout(() => {
         setTourVisible(false);
         tourBusyRef.current = false;
-        // Drain queue
         const next = tourQueueRef.current.shift();
         if (next) {
           const step = TOUR_STEPS.find(s => s.id === next);
-          if (step) setTimeout(() => runTourStep(step.text), 300);
+          if (step) setTimeout(() => runTourStep(step.text, step.anchor), 300);
         }
       }, 400);
     }, 350 + readMs);
@@ -280,7 +296,7 @@ export default function App() {
     if (tourBusyRef.current) {
       tourQueueRef.current.push(stepId);
     } else {
-      runTourStep(step.text);
+      runTourStep(step.text, step.anchor);
     }
   }, [runTourStep]);
 
@@ -1197,10 +1213,11 @@ export default function App() {
       {/* Tour voiceover bubble */}
       {tourVisible && (
         <div
-          className="fixed bottom-6 left-6 z-[70] flex items-end gap-3 pointer-events-none"
+          className="fixed left-5 z-[70] flex items-center gap-3 pointer-events-none"
           style={{
+            top: tourTop,
             opacity: tourPhase === 'hold' ? 1 : 0,
-            transform: tourPhase === 'in' ? 'translateY(12px)' : 'translateY(0)',
+            transform: tourPhase === 'in' ? 'translateX(-10px)' : 'translateX(0)',
             transition: tourPhase === 'out'
               ? 'opacity 400ms ease-in'
               : 'opacity 350ms ease-out, transform 350ms ease-out',
@@ -1222,12 +1239,12 @@ export default function App() {
 
           {/* Bubble */}
           <div
-            className="relative max-w-[340px] rounded-2xl rounded-bl-sm px-4 py-3 shadow-xl"
+            className="relative max-w-[320px] rounded-2xl rounded-tl-sm px-4 py-3 shadow-xl"
             style={{ background: '#1e293b' }}
           >
-            {/* Tail */}
+            {/* Tail pointing left toward avatar */}
             <div
-              className="absolute -left-1.5 bottom-3 size-3 rotate-45 rounded-sm"
+              className="absolute -left-1.5 top-4 size-3 rotate-45 rounded-sm"
               style={{ background: '#1e293b' }}
             />
             <p className="text-[12.5px] leading-relaxed text-white/90 relative z-10">
@@ -1775,6 +1792,7 @@ export default function App() {
                               expandedDataset === dataset.id ? null : dataset.id
                             )
                           }
+                          {...(dataset.id === 'passenger-master' ? { 'data-tour-anchor': 'tour-passenger-row' } : {})}
                           className={`border-b border-border cursor-pointer hover:bg-[#fafafa] ${
                             expandedDataset === dataset.id ? 'bg-[#f5f5f5]' : ''
                           } ${
@@ -2058,7 +2076,7 @@ export default function App() {
                                   {/* ADJUST RULES PANEL */}
                                   {agentState === 'proposed' && showAdjustRules && (
                                     <>
-                                      <div className="p-5 border-b border-border flex items-center justify-between">
+                                      <div className="p-5 border-b border-border flex items-center justify-between" data-tour-anchor="tour-adjust-rules">
                                         <div>
                                           <h3 className="text-[14px] font-medium text-foreground">Adjust cleaning rules</h3>
                                           <p className="text-[12px] text-foreground/50 mt-0.5">Toggle any rule off to exclude it from this run. All enabled rules apply automatically with no approval needed.</p>
@@ -2233,7 +2251,7 @@ export default function App() {
                                       </div>
 
                                       {/* Actions */}
-                                      <div className="p-5">
+                                      <div className="p-5" data-tour-anchor="tour-proposed-actions">
                                         <div className="flex items-center justify-between">
                                           <button
                                             onClick={() => setShowAdjustRules(true)}
@@ -2296,7 +2314,7 @@ export default function App() {
                                         </div>
                                         {/* Stream breakdown — only shown once medium-risk patterns have been surfaced */}
                                         {visibleStreams.length > 1 && (
-                                        <div className="space-y-2.5">
+                                        <div className="space-y-2.5" data-tour-anchor="tour-stream-progress">
                                           {visibleStreams.map(stream => {
                                             const sp = Math.round(streamProgress[stream.id]);
                                             const status = getStreamStatus(stream);
@@ -2376,7 +2394,7 @@ export default function App() {
                                       {/* Decision queue — pending only, disappears once all resolved */}
                                       {pendingDecisions.length > 0 && (
                                         <div className="border-b border-border">
-                                          <div className="px-5 py-3 bg-[#fffbeb] border-b border-[#fde68a] flex items-center justify-between">
+                                          <div className="px-5 py-3 bg-[#fffbeb] border-b border-[#fde68a] flex items-center justify-between" data-tour-anchor="tour-decision-queue">
                                             <div className="flex items-center gap-2">
                                               <AlertTriangle className="size-3.5 text-[#d97706]" strokeWidth={2} />
                                               <span className="text-[12px] font-medium text-[#92400e]">
@@ -2434,7 +2452,7 @@ export default function App() {
                                                   </div>
                                                   {/* Sub-patterns section — collapsed by default */}
                                                   {subPatterns && (
-                                                    <div className="px-5 pb-4">
+                                                    <div className="px-5 pb-4" data-tour-anchor="tour-sub-patterns">
                                                       <button
                                                         onClick={() => toggleDecisionDetail(decision.id)}
                                                         className="flex items-center gap-1.5 text-[11px] text-foreground/60 hover:text-foreground mb-2"
@@ -3006,7 +3024,7 @@ export default function App() {
                                       </div>
 
                                       {/* Summary */}
-                                      <div className="p-5 border-b border-border">
+                                      <div className="p-5 border-b border-border" data-tour-anchor="tour-completion-summary">
                                         <h3 className="text-[13px] font-medium text-foreground mb-3">
                                           What happened in this run
                                         </h3>
