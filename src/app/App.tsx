@@ -158,31 +158,31 @@ type TourStep = { id: string; text: string };
 const TOUR_STEPS: TourStep[] = [
   {
     id: 'idle',
-    text: "This demo simulates the day-to-day workflow of a Data Operations Lead working in a data asset management platform for an airline. The passenger master record has been flagged for remediation. Click the row to see what the AI agent has prepared before touching a single record.",
+    text: "This workspace shows the data assets managed by the operations team at a fictional airline. Each row represents a dataset in the platform, showing its health status, owner, and records affected. The passenger master record has been flagged as needing attention. Click on it to open the remediation panel and see what the AI agent has prepared.",
   },
   {
     id: 'proposed',
-    text: "Before starting, the agent surfaces its full approach: which records it can clean at high confidence, where it expects to pause for a decision, and an estimated runtime. Any changes can be rolled back up to 30 days. Review the plan, then approve to begin.",
+    text: "The agent has run a preliminary scan across 1.2 million passenger records and categorised them by remediation approach. The top section shows what it can clean automatically at very high confidence, things like date format standardisation and loyalty tier mismatches. Below that are patterns where it expects to pause and ask for your input before proceeding. Review the plan and the 30-day rollback guarantee, then approve to start the run.",
   },
   {
     id: 'adjust-rules',
-    text: "Each auto-clean rule can be toggled off if it conflicts with the organisation's policy or current risk appetite. The human stays in full control of what the agent is and is not permitted to do autonomously.",
+    text: "Here you can fine-tune which cleaning rules are active before the run begins. Each rule shows a confidence threshold, a record count from the preliminary scan, and an example of the transformation it will apply. Toggling a rule off excludes it from this run entirely, giving you direct control over the agent's autonomy before a single record is touched.",
   },
   {
     id: 'running',
-    text: "Once approved, the agent begins processing, starting with the lowest-risk rules first. Every action is logged in real time with per-stream progress. Whether the user watches the full run or returns later, the system's state is always legible.",
+    text: "The agent is now processing records across parallel streams, starting with the safest and most confident changes first. Each stream has its own progress bar so you always know exactly where things stand. To see how the agent handles a complex edge case that requires a human decision, click Block agent in the test controls panel on the right.",
   },
   {
     id: 'blocked',
-    text: "The agent has paused this stream and is waiting for your input. Other streams are still running. Open the decision card below to review the edge case and choose how to proceed.",
+    text: "The agent has encountered an identity or classification pattern it cannot resolve within its confidence threshold and has surfaced it for your review. Notice that other streams are still running in the background. Only this specific pattern is paused, keeping the rest of the remediation moving forward. Scroll down to the decision card to review the edge case and approve or skip.",
   },
   {
     id: 'sub-patterns',
-    text: "Each pattern breaks into sub-patterns with individual confidence levels and examples. Approve the full set, or disable the ones you would rather handle manually before submitting.",
+    text: "Each flagged pattern is broken into sub-patterns based on the underlying data signals the agent found. Every sub-pattern shows its confidence level, the number of records affected, and a concrete before-and-after example. You can approve the full set with one click, or selectively disable individual sub-patterns you would rather handle outside this run.",
   },
   {
     id: 'completed',
-    text: "The run is complete. This panel shows exactly what was processed, what fell outside scope, and what still needs a human decision. Use the actions below to review pending cases, download the audit trail, or browse the cleaned dataset.",
+    text: "The run is complete. The summary shows a clear breakdown of what happened: records grouped by how they were handled, auto-resolved, approved by policy, or queued for manual review. Below that, out-of-scope datasets are listed with a reason so nothing looks accidentally skipped. Use the action buttons to review pending cases, download the full audit trail, or browse the cleaned dataset.",
   },
 ];
 
@@ -353,7 +353,11 @@ export default function App() {
   const activeTourStepId = (() => {
     if (expandedDataset !== 'passenger-master') return 'idle';
     if (agentState === 'proposed') return showAdjustRules ? 'adjust-rules' : 'proposed';
-    if (agentState === 'running') return expandedDecisionDetails.size > 0 ? 'sub-patterns' : 'running';
+    if (agentState === 'running') {
+      if (expandedDecisionDetails.size > 0) return 'sub-patterns';
+      if (pendingDecisions.length > 0) return 'blocked';
+      return 'running';
+    }
     if (agentState === 'blocked') return expandedDecisionDetails.size > 0 ? 'sub-patterns' : 'blocked';
     if (agentState === 'completed') return 'completed';
     return null;
