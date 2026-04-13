@@ -154,6 +154,38 @@ const STREAMS: StreamDef[] = [
   { id: 'minor-consent', label: 'Minors with incomplete consent records', description: 'Minor data compliance · 520 records', records: 520, decisionLabel: 'Minors with incomplete consent records', speed: 0.3 },
 ];
 
+type TourStep = { id: string; text: string };
+const TOUR_STEPS: TourStep[] = [
+  {
+    id: 'idle',
+    text: "This demo simulates the day-to-day workflow of a Data Operations Lead working in a data asset management platform for an airline. The passenger master record has been flagged for remediation, and opening it shows what the AI agent has prepared before touching a single record.",
+  },
+  {
+    id: 'proposed',
+    text: "Before starting, the agent runs a preliminary scan and surfaces its full approach: which records it can clean at high confidence, where it expects to pause for a decision, and an estimated runtime. Any changes can be rolled back up to 30 days, giving the operations lead confidence to proceed.",
+  },
+  {
+    id: 'adjust-rules',
+    text: "The auto-clean rules can be adjusted before the run begins. Each rule can be toggled off if it conflicts with the organisation's policy or the user's current risk appetite. The human stays in full control of what the agent is and is not permitted to do autonomously.",
+  },
+  {
+    id: 'running',
+    text: "Once approved, the agent begins processing, starting with the lowest-risk rules first. Every action is logged in real time with per-stream progress. Whether the user watches the full run or returns later, the system's state is always legible and nothing is a black box.",
+  },
+  {
+    id: 'blocked',
+    text: "When the agent encounters an edge case it cannot resolve within its confidence threshold, it pauses only that specific stream and not the full run. Other streams continue uninterrupted. The interruption is proportional to the risk, and the user is called back only when their judgement is genuinely required.",
+  },
+  {
+    id: 'sub-patterns',
+    text: "Each flagged pattern is broken into sub-patterns, each with its own confidence level and a concrete example. The user can approve the full set or selectively disable sub-patterns they would rather handle manually, giving precise control without disrupting the rest of the run.",
+  },
+  {
+    id: 'completed',
+    text: "At completion, the summary shows exactly what was processed in this run, what fell outside its scope, and what still requires a human decision. From here, the operations lead can review pending edge cases, download the full audit trail, or browse the cleaned dataset with every change highlighted.",
+  },
+];
+
 type Dataset = {
   id: string;
   name: string;
@@ -209,6 +241,49 @@ export default function App() {
   const addLog = useCallback((entry: Omit<LogEntry, 'id' | 'time'>) => {
     setActivityLog(prev => [{ ...entry, id: `log-${Date.now()}-${Math.random()}`, time: new Date() }, ...prev]);
   }, []);
+  // Tour overlay state
+  const [tourVisible, setTourVisible] = useState<boolean>(false);
+  const [tourPhase, setTourPhase] = useState<'in' | 'hold' | 'out'>('in');
+  const [tourText, setTourText] = useState<string>('');
+  const shownTourSteps = useRef<Set<string>>(new Set());
+  const tourQueueRef = useRef<string[]>([]);
+  const tourBusyRef = useRef<boolean>(false);
+  const [profileImgError, setProfileImgError] = useState<boolean>(false);
+
+  const runTourStep = useCallback((text: string) => {
+    tourBusyRef.current = true;
+    setTourText(text);
+    setTourPhase('in');
+    setTourVisible(true);
+    const readMs = Math.max(9000, text.length * 63);
+    setTimeout(() => setTourPhase('hold'), 350);
+    setTimeout(() => {
+      setTourPhase('out');
+      setTimeout(() => {
+        setTourVisible(false);
+        tourBusyRef.current = false;
+        // Drain queue
+        const next = tourQueueRef.current.shift();
+        if (next) {
+          const step = TOUR_STEPS.find(s => s.id === next);
+          if (step) setTimeout(() => runTourStep(step.text), 300);
+        }
+      }, 400);
+    }, 350 + readMs);
+  }, []);
+
+  const showTourStep = useCallback((stepId: string) => {
+    if (shownTourSteps.current.has(stepId)) return;
+    shownTourSteps.current.add(stepId);
+    const step = TOUR_STEPS.find(s => s.id === stepId);
+    if (!step) return;
+    if (tourBusyRef.current) {
+      tourQueueRef.current.push(stepId);
+    } else {
+      runTourStep(step.text);
+    }
+  }, [runTourStep]);
+
   // Refs to detect transitions
   const prevAgentStateRef = useRef<string>('proposed');
   const prevDecisionsRef = useRef<Decision[]>([]);
@@ -266,6 +341,39 @@ export default function App() {
       Notification.requestPermission();
     }
   }, []);
+
+  // Tour trigger: idle (on mount)
+  useEffect(() => { showTourStep('idle'); }, []);
+
+  // Tour trigger: proposed state (row expanded)
+  useEffect(() => {
+    if (expandedDataset === 'passenger-master' && agentState === 'proposed') showTourStep('proposed');
+  }, [expandedDataset, agentState]);
+
+  // Tour trigger: adjust rules opened
+  useEffect(() => {
+    if (showAdjustRules) showTourStep('adjust-rules');
+  }, [showAdjustRules]);
+
+  // Tour trigger: agent running
+  useEffect(() => {
+    if (agentState === 'running') showTourStep('running');
+  }, [agentState]);
+
+  // Tour trigger: first block
+  useEffect(() => {
+    if (agentState === 'blocked') showTourStep('blocked');
+  }, [agentState]);
+
+  // Tour trigger: sub-patterns expanded (any decision detail opened)
+  useEffect(() => {
+    if (expandedDecisionDetails.size > 0) showTourStep('sub-patterns');
+  }, [expandedDecisionDetails]);
+
+  // Tour trigger: completed
+  useEffect(() => {
+    if (agentState === 'completed') showTourStep('completed');
+  }, [agentState]);
 
   // Undo countdown after approving a policy — ticks down, then clears
   useEffect(() => {
@@ -1086,6 +1194,49 @@ export default function App() {
 
   return (
     <div className="h-screen flex bg-[#fafafa]">
+      {/* Tour voiceover bubble */}
+      {tourVisible && (
+        <div
+          className="fixed bottom-6 left-6 z-[70] flex items-end gap-3 pointer-events-none"
+          style={{
+            opacity: tourPhase === 'hold' ? 1 : 0,
+            transform: tourPhase === 'in' ? 'translateY(12px)' : 'translateY(0)',
+            transition: tourPhase === 'out'
+              ? 'opacity 400ms ease-in'
+              : 'opacity 350ms ease-out, transform 350ms ease-out',
+          }}
+        >
+          {/* Avatar */}
+          <div className="size-10 rounded-full overflow-hidden border-2 border-white shadow-lg shrink-0 bg-[#1e293b] flex items-center justify-center">
+            {!profileImgError ? (
+              <img
+                src="/profile.jpg"
+                alt="Ayla"
+                className="size-full object-cover"
+                onError={() => setProfileImgError(true)}
+              />
+            ) : (
+              <span className="text-[13px] font-semibold text-white select-none">AW</span>
+            )}
+          </div>
+
+          {/* Bubble */}
+          <div
+            className="relative max-w-[340px] rounded-2xl rounded-bl-sm px-4 py-3 shadow-xl"
+            style={{ background: '#1e293b' }}
+          >
+            {/* Tail */}
+            <div
+              className="absolute -left-1.5 bottom-3 size-3 rotate-45 rounded-sm"
+              style={{ background: '#1e293b' }}
+            />
+            <p className="text-[12.5px] leading-relaxed text-white/90 relative z-10">
+              {tourText}
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Sample Resolution Modal */}
       {showSampleModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
