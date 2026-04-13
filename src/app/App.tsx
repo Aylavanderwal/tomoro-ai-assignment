@@ -270,12 +270,7 @@ export default function App() {
     setTourWords(text.split(' '));
     setTourKey(k => k + 1);
     setTourVisible(true);
-    const wordCount = text.split(' ').length;
-    const allWordsMs = wordCount * 70 + 200;
-    const holdMs = Math.max(7000, allWordsMs + 3500);
-    const t = setTimeout(() => dismissTour(), holdMs);
-    tourTimeoutsRef.current.push(t);
-  }, [clearTourTimers, dismissTour]);
+  }, [clearTourTimers]);
 
   const showTourStep = useCallback((stepId: string) => {
     if (shownTourSteps.current.has(stepId)) return;
