@@ -170,11 +170,31 @@ const TOUR_STEPS: TourStep[] = [
   },
   {
     id: 'running',
-    text: "The agent is now processing records across parallel streams, starting with the safest and most confident changes first. Each stream has its own progress bar so you always know exactly where things stand. To see how the agent handles a complex edge case that requires a human decision, click Block agent in the test controls panel on the right.",
+    text: "The agent is now processing the passenger master record, starting with the safest and most confident changes first. Every action is logged in the activity panel in real time so you can always see exactly what is being applied and why. To see how the agent handles a complex edge case that requires your input, click Block agent in the test controls panel on the right.",
+  },
+  {
+    id: 'running-nudge-block',
+    text: "The agent has resolved the first edge case and resumed processing. There is one more data conflict in this dataset that will require your input. Click Block agent again in the test controls to surface it and see a different type of issue.",
+  },
+  {
+    id: 'running-nudge-failure',
+    text: "Both decision points have been handled and the agent is continuing the cleanup. To explore what happens when the system encounters an unrecoverable error during a run, click Simulate failure in the test controls on the right.",
+  },
+  {
+    id: 'running-nudge-complete',
+    text: "The agent has restarted after the failure and is continuing from where it left off. You have now seen the main scenarios in this workflow. Let the run complete to see the final summary, or explore any of the panels you have already reviewed.",
+  },
+  {
+    id: 'failed',
+    text: "The agent has encountered a critical error it cannot recover from and has stopped processing. No further changes are being applied to the dataset. From here you can roll back any partial changes that were applied before the failure, or review what was completed before the error occurred.",
+  },
+  {
+    id: 'sample-resolutions',
+    text: "This panel shows examples of how the agent transforms individual records. Each example includes the original value, the proposed change, and the confidence score behind the decision. These samples come directly from the preliminary scan and give a concrete sense of the quality and nature of the changes being applied.",
   },
   {
     id: 'blocked',
-    text: "The agent has encountered an identity or classification pattern it cannot resolve within its confidence threshold and has surfaced it for your review. Notice that other streams are still running in the background. Only this specific pattern is paused, keeping the rest of the remediation moving forward. Scroll down to the decision card to review the edge case and approve or skip.",
+    text: "The agent has encountered an identity or classification pattern it cannot resolve within its confidence threshold and has surfaced it for your review. Notice that other processing is continuing in the background. Only this specific pattern is paused, keeping the rest of the remediation moving forward. Scroll down to the decision card to review the edge case and approve or skip.",
   },
   {
     id: 'sub-patterns',
@@ -351,14 +371,26 @@ export default function App() {
 
   // Derived decision state — must be before activeTourStepId
   const pendingDecisions = decisions.filter(d => d.status === 'pending');
+  const resolvedDecisionCount = decisions.filter(d => d.status !== 'pending').length;
+  const hasSeenFailureRef = useRef<boolean>(false);
+
+  // Track when failure state is seen so tour can sequence correctly
+  useEffect(() => {
+    if (agentState === 'failed') hasSeenFailureRef.current = true;
+  }, [agentState]);
 
   // Derive which tour step is relevant right now and swap whenever it changes
   const activeTourStepId = (() => {
+    if (showSampleModal) return 'sample-resolutions';
     if (expandedDataset !== 'passenger-master') return 'idle';
     if (agentState === 'proposed') return showAdjustRules ? 'adjust-rules' : 'proposed';
+    if (agentState === 'failed') return 'failed';
     if (agentState === 'running') {
       if (expandedDecisionDetails.size > 0) return 'sub-patterns';
       if (pendingDecisions.length > 0) return 'blocked';
+      if (hasSeenFailureRef.current) return 'running-nudge-complete';
+      if (resolvedDecisionCount >= 2) return 'running-nudge-failure';
+      if (resolvedDecisionCount === 1) return 'running-nudge-block';
       return 'running';
     }
     if (agentState === 'blocked') return expandedDecisionDetails.size > 0 ? 'sub-patterns' : 'blocked';
@@ -383,7 +415,6 @@ export default function App() {
   }, [undoCountdown]);
 
   // Derived decision state
-  const resolvedDecisionCount = decisions.filter(d => d.status !== 'pending').length;
   const currentPendingDecision = pendingDecisions[0] ?? null;
   const isStruggling = agentState === 'blocked' && pendingDecisions.length >= 4;
 
