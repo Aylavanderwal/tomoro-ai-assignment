@@ -349,6 +349,9 @@ export default function App() {
     }
   }, []);
 
+  // Derived decision state — must be before activeTourStepId
+  const pendingDecisions = decisions.filter(d => d.status === 'pending');
+
   // Derive which tour step is relevant right now and swap whenever it changes
   const activeTourStepId = (() => {
     if (expandedDataset !== 'passenger-master') return 'idle';
@@ -381,7 +384,6 @@ export default function App() {
 
   // Derived decision state
   const resolvedDecisionCount = decisions.filter(d => d.status !== 'pending').length;
-  const pendingDecisions = decisions.filter(d => d.status === 'pending');
   const currentPendingDecision = pendingDecisions[0] ?? null;
   const isStruggling = agentState === 'blocked' && pendingDecisions.length >= 4;
 
