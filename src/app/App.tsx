@@ -313,6 +313,7 @@ export default function App() {
   const prevAgentStateRef = useRef<string>('proposed');
   const prevDecisionsRef = useRef<Decision[]>([]);
   const completedStreamsRef = useRef<Set<string>>(new Set());
+  const autoCleanLoggedRef = useRef<Set<string>>(new Set());
 
   const toggleDecisionDetail = (id: string) => setExpandedDecisionDetails(prev => {
     const next = new Set(prev);
@@ -434,16 +435,15 @@ export default function App() {
     return isBlocked ? 'blocked' as const : 'running' as const;
   };
 
-  // Auto-progress each stream independently — blocked streams freeze, others continue
+  // Auto-progress — freezes entirely when any decision is pending
   useEffect(() => {
     if (agentState !== 'running') return;
-    const pendingLabels = new Set(pendingDecisions.map(d => d.label));
+    if (pendingDecisions.length > 0) return;
     const interval = setInterval(() => {
       setStreamProgress(prev => {
         const next = { ...prev };
         for (const stream of STREAMS) {
-          const isBlocked = stream.decisionLabel ? pendingLabels.has(stream.decisionLabel) : false;
-          if (!isBlocked && next[stream.id] < 100) {
+          if (next[stream.id] < 100) {
             next[stream.id] = Math.min(100, next[stream.id] + stream.speed);
           }
         }
@@ -462,35 +462,20 @@ export default function App() {
     }
   }, [streamProgress, agentState, decisions]);
 
-  // Detect full block — all discovered streams either blocked or complete, at least one blocked
+  // Block immediately when any decision is pending
   useEffect(() => {
     if (agentState !== 'running') return;
-    const pendingLabels = new Set(pendingDecisions.map(d => d.label));
-    const discovered = STREAMS.filter(s => s.decisionLabel === null || decisions.some(d => d.label === s.decisionLabel));
-    const allStalled = discovered.every(s => {
-      if (streamProgress[s.id] >= 100) return true;
-      if (s.decisionLabel && pendingLabels.has(s.decisionLabel)) return true;
-      return false;
-    });
-    const anyBlocked = discovered.some(s => s.decisionLabel && pendingLabels.has(s.decisionLabel) && streamProgress[s.id] < 100);
-    if (allStalled && anyBlocked) {
+    if (pendingDecisions.length > 0) {
       setAgentState('blocked');
       setShowBlockedModal(true);
     }
-  }, [streamProgress, agentState, pendingDecisions, decisions]);
+  }, [agentState, pendingDecisions]);
 
-  // Auto-resume — when a decision is resolved, unblock the agent if any discovered stream can progress
+  // Auto-resume — when all decisions resolved, immediately resume
   useEffect(() => {
     if (agentState !== 'blocked') return;
-    const pendingLabels = new Set(pendingDecisions.map(d => d.label));
-    const discovered = STREAMS.filter(s => s.decisionLabel === null || decisions.some(d => d.label === s.decisionLabel));
-    const anyCanProgress = discovered.some(s => {
-      if (streamProgress[s.id] >= 100) return false;
-      if (s.decisionLabel && pendingLabels.has(s.decisionLabel)) return false;
-      return true;
-    });
-    if (anyCanProgress) setAgentState('running');
-  }, [pendingDecisions, agentState, streamProgress, decisions]);
+    if (pendingDecisions.length === 0) setAgentState('running');
+  }, [pendingDecisions, agentState]);
 
   // Log agent state transitions
   useEffect(() => {
@@ -498,6 +483,7 @@ export default function App() {
     prevAgentStateRef.current = agentState;
     if (prev === agentState) return;
     if (prev === 'proposed' && agentState === 'running') {
+      autoCleanLoggedRef.current = new Set();
       addLog({ variant: 'start', text: `Agent started · 1.2M records queued · ${AUTO_CLEAN_RULES.filter((_, i) => !disabledAutoRules.has(i)).length} auto-clean rules active` });
     } else if (agentState === 'blocked') {
       addLog({ variant: 'block', text: 'Agent blocked · processed all safe work · waiting for decisions' });
@@ -532,15 +518,22 @@ export default function App() {
     prevDecisionsRef.current = decisions;
   }, [decisions]);
 
-  // Log stream completions
+  // Log auto-clean rule completions as progress advances
   useEffect(() => {
     if (agentState !== 'running') return;
-    STREAMS.forEach(s => {
-      if (streamProgress[s.id] >= 100 && !completedStreamsRef.current.has(s.id)) {
-        completedStreamsRef.current.add(s.id);
-        addLog({ variant: 'stream', text: `Stream complete: "${s.label}" · ${s.records.toLocaleString()} records processed` });
-      }
-    });
+    const sp = streamProgress['low-risk'];
+    if (sp >= 15 && !autoCleanLoggedRef.current.has('date-formats')) {
+      autoCleanLoggedRef.current.add('date-formats');
+      addLog({ variant: 'stream', text: 'Date format standardisation applied — 228,467 records · 99.1% confidence' });
+    }
+    if (sp >= 40 && !autoCleanLoggedRef.current.has('loyalty-tier')) {
+      autoCleanLoggedRef.current.add('loyalty-tier');
+      addLog({ variant: 'stream', text: 'Loyalty tier synced from loyalty platform — 142,340 records · 98.7% confidence' });
+    }
+    if (sp >= 65 && !autoCleanLoggedRef.current.has('doc-formatting')) {
+      autoCleanLoggedRef.current.add('doc-formatting');
+      addLog({ variant: 'stream', text: 'Travel document field formatting corrected — 86,127 records · 99.8% confidence' });
+    }
   }, [streamProgress, agentState]);
 
   const datasetsByCategory: Record<string, Dataset[]> = {
@@ -2334,39 +2327,18 @@ export default function App() {
                                       <div className="p-5 border-b border-border">
                                         <div className="flex items-center justify-between mb-1.5">
                                           <span className="text-[12px] font-medium text-foreground">Progress</span>
-                                          <span className="text-[12px] text-foreground/70">{Math.round(progress * 10) / 10}%</span>
+                                          <div className="flex items-center gap-3">
+                                            <button
+                                              onClick={() => setShowSampleModal(true)}
+                                              className="text-[12px] text-[#3b82f6] hover:text-[#2563eb] font-medium"
+                                            >
+                                              View sample resolutions →
+                                            </button>
+                                            <span className="text-[12px] text-foreground/70">{Math.round(progress * 10) / 10}%</span>
+                                          </div>
                                         </div>
                                         <div className="h-1.5 bg-[#e5e7eb] rounded-full overflow-hidden">
                                           <div className="h-full bg-[#3b82f6] transition-all duration-500" style={{ width: `${Math.round(progress * 10) / 10}%` }} />
-                                        </div>
-                                      </div>
-
-                                      {/* Current actions */}
-                                      <div className="p-5 border-b border-border">
-                                        <div className="flex items-center justify-between mb-3">
-                                          <h3 className="text-[13px] font-medium text-foreground">
-                                            Current actions
-                                          </h3>
-                                          <button
-                                            onClick={() => setShowSampleModal(true)}
-                                            className="text-[12px] text-[#3b82f6] hover:text-[#2563eb] font-medium"
-                                          >
-                                            View sample resolutions →
-                                          </button>
-                                        </div>
-                                        <div className="space-y-2.5">
-                                          <div className="flex items-center gap-2.5 text-[12px]">
-                                            <div className="size-1.5 rounded-full bg-[#3b82f6] animate-pulse" />
-                                            <span className="text-foreground/80">Standardising date formats… (228,467 records · 99.1% confidence)</span>
-                                          </div>
-                                          <div className="flex items-center gap-2.5 text-[12px]">
-                                            <div className="size-1.5 rounded-full bg-[#3b82f6] animate-pulse" />
-                                            <span className="text-foreground/80">Syncing loyalty tier from loyalty platform… (142,340 records · 98.7% confidence)</span>
-                                          </div>
-                                          <div className="flex items-center gap-2.5 text-[12px]">
-                                            <div className="size-1.5 rounded-full bg-[#3b82f6] animate-pulse" />
-                                            <span className="text-foreground/80">Correcting document formatting issues… (86,127 records · 99.8% confidence)</span>
-                                          </div>
                                         </div>
                                       </div>
 
