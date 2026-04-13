@@ -247,7 +247,7 @@ export default function App() {
   const [tourWords, setTourWords] = useState<string[]>([]);
   const [tourKey, setTourKey] = useState<number>(0); // bumped to re-trigger word animation
   const [tourDragPos, setTourDragPos] = useState<{ x: number; y: number } | null>(null);
-  const shownTourSteps = useRef<Set<string>>(new Set());
+  const lastTourStepRef = useRef<string | null>(null);
   const tourTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const dragStateRef = useRef<{ dragging: boolean; moved: boolean; startX: number; startY: number; posX: number; posY: number }>({ dragging: false, moved: false, startX: 0, startY: 0, posX: 0, posY: 0 });
   const [profileImgError, setProfileImgError] = useState<boolean>(false);
@@ -272,13 +272,6 @@ export default function App() {
     setTourVisible(true);
   }, [clearTourTimers]);
 
-  const showTourStep = useCallback((stepId: string) => {
-    if (shownTourSteps.current.has(stepId)) return;
-    shownTourSteps.current.add(stepId);
-    const step = TOUR_STEPS.find(s => s.id === stepId);
-    if (!step) return;
-    runTourStep(step.text);
-  }, [runTourStep]);
 
   // Drag handlers
   useEffect(() => {
@@ -356,38 +349,23 @@ export default function App() {
     }
   }, []);
 
-  // Tour trigger: idle (on mount)
-  useEffect(() => { showTourStep('idle'); }, []);
+  // Derive which tour step is relevant right now and swap whenever it changes
+  const activeTourStepId = (() => {
+    if (expandedDataset !== 'passenger-master') return 'idle';
+    if (agentState === 'proposed') return showAdjustRules ? 'adjust-rules' : 'proposed';
+    if (agentState === 'running') return expandedDecisionDetails.size > 0 ? 'sub-patterns' : 'running';
+    if (agentState === 'blocked') return expandedDecisionDetails.size > 0 ? 'sub-patterns' : 'blocked';
+    if (agentState === 'completed') return 'completed';
+    return null;
+  })();
 
-  // Tour trigger: proposed state (row expanded)
   useEffect(() => {
-    if (expandedDataset === 'passenger-master' && agentState === 'proposed') showTourStep('proposed');
-  }, [expandedDataset, agentState]);
-
-  // Tour trigger: adjust rules opened
-  useEffect(() => {
-    if (showAdjustRules) showTourStep('adjust-rules');
-  }, [showAdjustRules]);
-
-  // Tour trigger: agent running
-  useEffect(() => {
-    if (agentState === 'running') showTourStep('running');
-  }, [agentState]);
-
-  // Tour trigger: first block
-  useEffect(() => {
-    if (agentState === 'blocked') showTourStep('blocked');
-  }, [agentState]);
-
-  // Tour trigger: sub-patterns expanded (any decision detail opened)
-  useEffect(() => {
-    if (expandedDecisionDetails.size > 0) showTourStep('sub-patterns');
-  }, [expandedDecisionDetails]);
-
-  // Tour trigger: completed
-  useEffect(() => {
-    if (agentState === 'completed') showTourStep('completed');
-  }, [agentState]);
+    if (!activeTourStepId) return;
+    if (activeTourStepId === lastTourStepRef.current) return;
+    lastTourStepRef.current = activeTourStepId;
+    const step = TOUR_STEPS.find(s => s.id === activeTourStepId);
+    if (step) runTourStep(step.text);
+  }, [activeTourStepId, runTourStep]);
 
   // Undo countdown after approving a policy — ticks down, then clears
   useEffect(() => {
