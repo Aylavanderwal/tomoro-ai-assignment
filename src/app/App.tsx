@@ -254,16 +254,7 @@ export default function App() {
   });
   const activeAutoRuleRecords = AUTO_CLEAN_RULES.reduce((sum, r, i) => disabledAutoRules.has(i) ? sum : sum + r.records, 0);
   const [reviewGranularity, setReviewGranularity] = useState<'every-case' | 'exceptions-only' | 'batch-summaries'>('exceptions-only');
-  const ESCALATION_TRIGGERS = [
-    { id: 'identity-conflict', label: 'Conflicting passenger identities across systems' },
-    { id: 'missing-critical', label: 'Missing critical data (passport number, contact details)' },
-    { id: 'vip', label: 'High-value or VIP customer records' },
-    { id: 'partner-duplicates', label: 'Duplicate records detected across partner systems' },
-  ];
-  const [disabledEscalation, setDisabledEscalation] = useState<Set<string>>(new Set());
-  const toggleEscalation = (id: string) => setDisabledEscalation(prev => {
-    const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next;
-  });
+  const [confidenceLevel, setConfidenceLevel] = useState<'cautious' | 'balanced' | 'autonomous'>('balanced');
 
   // Activity log — real events appended as demo progresses
   const [activityLog, setActivityLog] = useState<LogEntry[]>([]);
@@ -2112,62 +2103,78 @@ export default function App() {
                                       <div className="p-5 border-b border-border flex items-center justify-between" data-tour-anchor="tour-adjust-rules">
                                         <div>
                                           <h3 className="text-[14px] font-medium text-foreground">Adjust approach</h3>
-                                          <p className="text-[12px] text-foreground/50 mt-0.5">Check the situations where you want the agent to stop and wait for your input. Everything else runs automatically.</p>
+                                          <p className="text-[12px] text-foreground/50 mt-0.5">Set how much autonomy the agent has before it stops and asks.</p>
                                         </div>
                                         <button onClick={() => setShowAdjustRules(false)} className="text-[12px] text-foreground/50 hover:text-foreground font-medium shrink-0 ml-4">← Back</button>
                                       </div>
 
-                                      {/* Escalation triggers — the only control */}
+                                      {/* Confidence threshold */}
                                       <div className="p-5 border-b border-border">
+                                        <p className="text-[11px] text-foreground/50 mb-4">The agent assigns a confidence score to every decision it makes. This controls the threshold below which it stops and waits for your input rather than acting.</p>
                                         <div className="space-y-2">
-                                          {ESCALATION_TRIGGERS.map(trigger => {
-                                            const isEnabled = !disabledEscalation.has(trigger.id);
-                                            return (
-                                              <button
-                                                key={trigger.id}
-                                                onClick={() => toggleEscalation(trigger.id)}
-                                                className={`w-full text-left flex items-center gap-3 px-3 py-2.5 rounded border transition-colors ${isEnabled ? 'border-border bg-background hover:bg-accent' : 'border-border bg-[#fafafa]'}`}
-                                              >
-                                                <div className={`size-4 rounded border-2 flex items-center justify-center shrink-0 transition-colors ${isEnabled ? 'border-[#3b82f6] bg-[#3b82f6]' : 'border-foreground/20 bg-transparent'}`}>
-                                                  {isEnabled && <Check className="size-2.5 text-white" strokeWidth={3} />}
+                                          {([
+                                            {
+                                              value: 'cautious' as const,
+                                              label: 'Cautious',
+                                              threshold: 'Pause below 90%',
+                                              desc: 'More interruptions. The agent surfaces anything it is less than highly certain about.',
+                                              impact: '~2,400 cases for review',
+                                              color: 'text-[#d97706]',
+                                              bg: 'bg-[#fffbeb]',
+                                              border: 'border-[#fde68a]',
+                                            },
+                                            {
+                                              value: 'balanced' as const,
+                                              label: 'Balanced',
+                                              threshold: 'Pause below 80%',
+                                              desc: 'Recommended. The agent handles what it is confident about and surfaces genuine ambiguities.',
+                                              impact: '~800 cases for review',
+                                              color: 'text-[#2563eb]',
+                                              bg: 'bg-[#eff6ff]',
+                                              border: 'border-[#bfdbfe]',
+                                            },
+                                            {
+                                              value: 'autonomous' as const,
+                                              label: 'Autonomous',
+                                              threshold: 'Pause below 70%',
+                                              desc: 'Fewer interruptions. The agent acts on more cases independently and only surfaces the most uncertain.',
+                                              impact: '~300 cases for review',
+                                              color: 'text-[#059669]',
+                                              bg: 'bg-[#f0fdf4]',
+                                              border: 'border-[#bbf7d0]',
+                                            },
+                                          ]).map(opt => (
+                                            <button
+                                              key={opt.value}
+                                              onClick={() => setConfidenceLevel(opt.value)}
+                                              className={`w-full text-left px-4 py-3 rounded border-2 transition-colors ${confidenceLevel === opt.value ? `${opt.bg} ${opt.border}` : 'border-border bg-background hover:bg-accent'}`}
+                                            >
+                                              <div className="flex items-start justify-between gap-3">
+                                                <div className="flex items-start gap-2.5">
+                                                  <div className={`mt-0.5 size-3.5 rounded-full border-2 shrink-0 flex items-center justify-center ${confidenceLevel === opt.value ? opt.border.replace('border-', 'border-') : 'border-foreground/20'}`}
+                                                    style={{ borderColor: confidenceLevel === opt.value ? undefined : undefined }}>
+                                                    {confidenceLevel === opt.value && <div className="size-1.5 rounded-full" style={{ background: 'currentColor' }} />}
+                                                  </div>
+                                                  <div>
+                                                    <div className={`text-[12px] font-semibold ${confidenceLevel === opt.value ? opt.color : 'text-foreground'}`}>{opt.label}</div>
+                                                    <div className="text-[11px] text-foreground/50 mt-0.5 leading-relaxed">{opt.desc}</div>
+                                                  </div>
                                                 </div>
-                                                <span className={`text-[12px] font-medium ${isEnabled ? 'text-foreground' : 'text-foreground/35'}`}>{trigger.label}</span>
-                                              </button>
-                                            );
-                                          })}
+                                                <div className="shrink-0 text-right">
+                                                  <div className={`text-[11px] font-medium ${confidenceLevel === opt.value ? opt.color : 'text-foreground/40'}`}>{opt.threshold}</div>
+                                                  <div className="text-[10px] text-foreground/40 mt-0.5">{opt.impact}</div>
+                                                </div>
+                                              </div>
+                                            </button>
+                                          ))}
                                         </div>
-                                        {disabledEscalation.size > 0 && (
-                                          <p className="text-[11px] text-[#d97706] mt-3">
-                                            {disabledEscalation.size} situation{disabledEscalation.size > 1 ? 's' : ''} unchecked — the agent will handle these without asking.
-                                          </p>
-                                        )}
-                                      </div>
-
-                                      {/* Batch mode toggle */}
-                                      <div className="p-5 border-b border-border">
-                                        <button
-                                          onClick={() => setReviewGranularity(prev => prev === 'batch-summaries' ? 'exceptions-only' : 'batch-summaries')}
-                                          className="w-full text-left flex items-start gap-3"
-                                        >
-                                          <div className={`mt-0.5 w-8 h-4.5 rounded-full shrink-0 relative transition-colors ${reviewGranularity === 'batch-summaries' ? 'bg-[#3b82f6]' : 'bg-[#d1d5db]'}`} style={{ height: '18px', width: '32px' }}>
-                                            <div className={`absolute top-0.5 size-3.5 rounded-full bg-white shadow transition-transform ${reviewGranularity === 'batch-summaries' ? 'translate-x-[15px]' : 'translate-x-0.5'}`} />
-                                          </div>
-                                          <div>
-                                            <div className="text-[12px] font-medium text-foreground">Don't interrupt during the run</div>
-                                            <div className="text-[11px] text-foreground/50 mt-0.5 leading-relaxed">
-                                              {reviewGranularity === 'batch-summaries'
-                                                ? 'The agent will complete the full run first. All cases that match your checklist above will be grouped and presented at the end for review.'
-                                                : 'The agent will pause mid-run each time it hits a case that matches your checklist above.'}
-                                            </div>
-                                          </div>
-                                        </button>
                                       </div>
 
                                       {/* Footer */}
                                       <div className="p-5 border-t border-border bg-[#fafafa]">
                                         <div className="flex items-center justify-between">
                                           <div className="text-[12px] text-foreground/60">
-                                            {ESCALATION_TRIGGERS.length - disabledEscalation.size} of {ESCALATION_TRIGGERS.length} situations require sign-off
+                                            {confidenceLevel === 'cautious' ? 'Pausing below 90% confidence' : confidenceLevel === 'balanced' ? 'Pausing below 80% confidence' : 'Pausing below 70% confidence'}
                                           </div>
                                           <button
                                             onClick={() => setShowAdjustRules(false)}
