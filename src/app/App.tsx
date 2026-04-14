@@ -50,7 +50,6 @@ type Decision = {
 const DECISION_TEMPLATES: Omit<Decision, 'id' | 'status' | 'pausedAt'>[] = [
   { label: 'Conflicting identity — no shared key', pattern: 'Same traveller detected across 3 source systems with no common field match', records: 8240 },
   { label: 'Travel document nationality ambiguity', pattern: 'Document type conflicts with inferred nationality — policy decision required', records: 3400 },
-  { label: 'Minors with incomplete consent records', pattern: 'Passenger age inferred as under 16 — guardian and consent records incomplete or missing', records: 520 },
 ];
 
 type SubPattern = {
@@ -67,20 +66,11 @@ type SubPattern = {
 const DECISION_SUB_PATTERNS: Record<string, SubPattern[]> = {
   'Conflicting identity — no shared key': [
     { records: 2840, confidenceLabel: '91%', confidenceColor: 'text-[#059669]', confidenceBg: 'bg-[#d1fae5]', signal: 'Name romanisation variant across PNR systems', action: 'Merge · standardise to passport-verified spelling', detail: 'The same traveller appears in Amadeus as "Mohammed Al-Rashidi" and in Sabre as "Mohammad Alrashidy" — a transliteration difference, not a different person. DOB and route history match exactly. The agent identified this as a romanisation variant using multilingual name normalisation; a deterministic rule would have rejected the match due to Levenshtein distance above threshold.', example: ['Amadeus: "Al-Rashidi, M"', 'Sabre: "Alrashidy, Mohammad"'] },
-    { records: 2190, confidenceLabel: '84%', confidenceColor: 'text-[#059669]', confidenceBg: 'bg-[#d1fae5]', signal: 'Overlapping flight routes + hotel redemption, no field match', action: 'Flag for human review · strong behavioural signal, no field match', detail: 'No individual field matches with confidence above 65%: names differ (first-name variant), DOBs differ by 2 years, email domains differ. However, the agent identified 4 overlapping LHR–DXB booking windows, the same hotel loyalty number across 3 stays, and a shared GDS device fingerprint. Confidence is strong enough to surface but not to merge automatically — flagged for staff confirmation.', example: ['Field match: none ≥65%', 'Behavioural: 84% · flag for review'] },
-    { records: 3210, confidenceLabel: '76%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'CS note links orphaned PNR to loyalty profile via maiden name', action: 'Flag as likely same person · human confirmation required', detail: 'The agent read a free-text customer service note on the orphaned profile: "customer mentioned booking under maiden name before marriage — please link to current account." Candidate match has a matching DOB and phone number but a different surname. Confidence is below the auto-merge threshold — flagged for a staff member to confirm the link before any records are written.', example: ['CS note: "old account, maiden name"', 'Candidate: same DOB + phone → 76%'] },
+    { records: 5400, confidenceLabel: '76%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'CS note links orphaned PNR to loyalty profile via maiden name', action: 'Flag as likely same person · human confirmation required', detail: 'The agent read a free-text customer service note on the orphaned profile: "customer mentioned booking under maiden name before marriage — please link to current account." Candidate match has a matching DOB and phone number but a different surname. Confidence is below the auto-merge threshold — flagged for a staff member to confirm the link before any records are written.', example: ['CS note: "old account, maiden name"', 'Candidate: same DOB + phone → 76%'] },
   ],
   'Travel document nationality ambiguity': [
     { records: 1240, confidenceLabel: '84%', confidenceColor: 'text-[#059669]', confidenceBg: 'bg-[#d1fae5]', signal: 'Stateless travel document + consistent booking origin', action: 'Infer nationality from 5-year booking history · flag for review', detail: 'The passenger holds a stateless travel document (Convention Travel Document), which carries no nationality field. The agent inferred likely nationality from 5 years of bookings consistently originating from the same country, combined with a billing address and loyalty registration address in the same country. A rule cannot process stateless documents — it has no nationality field to read.', example: ['Document: stateless (CTD)', 'Inferred: "DEU" from booking history → 84%'] },
-    { records: 980, confidenceLabel: '77%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: '2016 visa nationality conflicts with current booking data', action: 'Flag temporal conflict · which source takes precedence?', detail: 'A 2016 Schengen visa lists nationality as "MAR" (Morocco). However, booking data from 2021 onwards consistently shows UK origin, and a 2022 frequent flyer registration lists address in London. The agent flagged this temporal conflict: the 2016 document may reflect a prior status. A policy decision is needed on whether historical documents or current behavioural signals take precedence for nationality backfill.', example: ['2016 visa: nationality "MAR"', '2022 booking signal: "GBR" → conflict'] },
-    { records: 730, confidenceLabel: '71%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'CS note mentions dual nationality — which to record?', action: 'Flag for policy decision · dual nationality not supported in schema', detail: 'A customer service interaction note reads: "passenger clarified they hold both Irish and Canadian passports — either can be used for booking." The current schema supports a single nationality field. The agent detected this from free text and flagged it: the policy question is which nationality to record as primary, and whether a secondary nationality field should be created. Neither can be resolved by a rule.', example: ['CS note: "Irish and Canadian passports"', 'Schema: single nationality field → policy gap'] },
-    { records: 450, confidenceLabel: '68%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'Refugee travel document — different legal treatment than passport', action: 'Escalate to compliance · cannot auto-backfill', detail: 'The travel document on file is a 1951 Convention refugee travel document. Nationality in this document is legally distinct from the country of issuance and may carry data protection obligations that differ from a standard passport. The agent identified the document type from a scan and flagged it for compliance review — auto-backfill from this document type is not appropriate without legal guidance.', example: ['Document: refugee travel doc (1951)', 'Nationality field: requires compliance review'] },
-  ],
-  'Minors with incomplete consent records': [
-    { records: 184, confidenceLabel: '95%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'Loyalty account self-registered, DOB indicates passenger is under 16', action: 'Hold — transfer to verified guardian before any processing', detail: 'The loyalty account was created via the website self-registration flow, which does not verify age. The agent inferred the passenger is under 16 from the DOB on the linked booking. Under GDPR Article 8, accounts for under-16s require verifiable parental consent to be lawfully held. This account cannot be processed until a guardian is verified and consent is recorded.', example: ['Self-registered, DOB: 2012-04-03 (age 12)', 'Action: hold · require guardian verification'] },
-    { records: 142, confidenceLabel: '97%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'Child on booking with no adult contact linked', action: 'Cannot process — mandatory guardian contact is missing', detail: 'The booking includes a passenger whose DOB confirms they are under 16, but no adult contact record is linked. Aviation regulations require an adult point of contact for minors. Processing this record without a guardian link would violate the airline\'s duty-of-care policy and regulatory requirements. No automated fix is possible — a staff member must locate and attach the correct guardian contact.', example: ['Passenger DOB: 2013-08-17 (age 10)', 'No adult contact on record → cannot proceed'] },
-    { records: 118, confidenceLabel: '91%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'Guardian consent record present but expired — renewal needed', action: 'Flag for outreach — consent lapsed, cannot process until renewed', detail: 'A guardian consent record exists for this minor, but it was signed more than 2 years ago. The airline\'s data governance policy requires consent renewal every 24 months for minor records. The agent cannot renew consent automatically — this requires a direct outreach message to the guardian on file, who must re-confirm before the record can be processed.', example: ['Consent signed: 2021-11-02 (2+ years ago)', 'Action: send renewal request to guardian'] },
-    { records: 76, confidenceLabel: '72%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: 'DOB conflicts between booking and loyalty — age is ambiguous', action: 'Cannot proceed — age must be confirmed from a verified document', detail: 'The booking record and loyalty platform carry different dates of birth for this passenger. The two DOBs straddle the age-16 threshold: one indicates 15, the other 17. Whether this passenger is a minor cannot be determined from existing data. Processing as an adult when the passenger may be a minor is not permissible. A staff member must confirm the correct DOB from a verified travel document before any processing can occur.', example: ['Booking DOB: 2009-02-14 (age 15)', 'Loyalty DOB: 2007-02-14 (age 17) → ambiguous'] },
+    { records: 2160, confidenceLabel: '71%', confidenceColor: 'text-[#d97706]', confidenceBg: 'bg-[#fef3c7]', signal: '2016 visa nationality conflicts with current booking data', action: 'Flag temporal conflict · which source takes precedence?', detail: 'A 2016 Schengen visa lists nationality as "MAR" (Morocco). However, booking data from 2021 onwards consistently shows UK origin, and a 2022 frequent flyer registration lists address in London. The agent flagged this temporal conflict: the 2016 document may reflect a prior status. A policy decision is needed on whether historical documents or current behavioural signals take precedence for nationality backfill.', example: ['2016 visa: nationality "MAR"', '2022 booking signal: "GBR" → conflict'] },
   ],
 };
 
@@ -89,26 +79,14 @@ const DECISION_OUTCOMES: Record<string, { headline: string; lines: { variant: 'a
     headline: '8,240 records reviewed — processing resumed',
     lines: [
       { variant: 'applied', text: '2,840 records merged · romanisation variants resolved to passport-verified spelling' },
-      { variant: 'flagged', text: '2,190 records queued for human review · strong behavioural signal but no field match' },
-      { variant: 'flagged', text: '3,210 records flagged as likely same person · maiden name change, awaiting staff confirmation' },
+      { variant: 'flagged', text: '5,400 records flagged for staff confirmation · maiden name changes and unverifiable identity links' },
     ],
   },
   'Travel document nationality ambiguity': {
     headline: '3,400 records reviewed — flagged for human decision',
     lines: [
       { variant: 'flagged', text: '1,240 records: nationality inferred from booking history · flagged for staff confirmation before any field is written' },
-      { variant: 'flagged', text: '980 records: temporal conflict between 2016 visa and current booking origin · policy decision required' },
-      { variant: 'flagged', text: '730 records: dual nationality in CS notes · schema supports one value, policy gap logged' },
-      { variant: 'escalated', text: '450 records: refugee travel documents · escalated to compliance, no auto-backfill permitted' },
-    ],
-  },
-  'Minors with incomplete consent records': {
-    headline: '520 records isolated — escalated to data governance, none auto-processed',
-    lines: [
-      { variant: 'escalated', text: '184 records: hold placed · self-registered under-16 accounts, guardian verification required (GDPR Art. 8)' },
-      { variant: 'escalated', text: '142 records: no adult contact on record · sent to airport operations team, cannot proceed' },
-      { variant: 'escalated', text: '118 records: consent lapsed · outreach queued to guardian on file for renewal' },
-      { variant: 'escalated', text: '76 records: age ambiguous across systems · staff must confirm from verified travel document' },
+      { variant: 'flagged', text: '2,160 records: document nationality conflicts with current booking signals · policy decision required' },
     ],
   },
 };
@@ -135,12 +113,20 @@ const AUTO_CLEAN_RULES = [
     example: ['PMS: "Silver"', 'Loyalty platform: "Gold" → update PMS'] as [string, string],
     detail: 'Overwrites the PMS loyalty tier with the authoritative value from the loyalty platform where the two systems conflict. Loyalty platform is the source of truth.',
   },
+] as const;
+
+const CLASSIFICATION_RULES = [
   {
-    label: 'Correct travel document field formatting',
-    records: 86127,
-    confidence: 99.8,
-    example: ['GBRGB123456', 'GBR GB123456'] as [string, string],
-    detail: 'Standardises document field spacing, character separators, and country code formatting to ICAO Doc 9303 standards.',
+    label: 'Classify records by data completeness',
+    records: 1200000,
+    detail: 'Each record is assigned a completeness tier — complete, partial, or incomplete — based on which required fields are present. This determines what processing can safely apply.',
+    example: ['Missing: passport, contact email', 'Tier: incomplete · queued for manual review'] as [string, string],
+  },
+  {
+    label: 'Tag records containing sensitive data',
+    records: 1200000,
+    detail: 'Records are scanned and tagged by sensitivity level — standard PII, sensitive PII (passport, biometrics), or compliance-flagged (minors, refugee documents). Tags inform downstream access controls.',
+    example: ['Contains: DOB, passport number', 'Tag: sensitive PII'] as [string, string],
   },
 ] as const;
 
@@ -149,7 +135,6 @@ const STREAMS: StreamDef[] = [
   { id: 'low-risk', label: 'Low-risk auto-cleanup', description: 'Format fixes, field defaults, deduplication at 99%+ confidence', records: 456000, decisionLabel: null, speed: 0.5 },
   { id: 'identity-conflicts', label: 'Conflicting identity — no shared key', description: 'Cross-system identity resolution · 8,240 records', records: 8240, decisionLabel: 'Conflicting identity — no shared key', speed: 0.3 },
   { id: 'nationality-ambiguity', label: 'Travel document nationality ambiguity', description: 'Document nationality policy · 3,400 records', records: 3400, decisionLabel: 'Travel document nationality ambiguity', speed: 0.3 },
-  { id: 'minor-consent', label: 'Minors with incomplete consent records', description: 'Minor data compliance · 520 records', records: 520, decisionLabel: 'Minors with incomplete consent records', speed: 0.3 },
 ];
 
 type TourStep = { id: string; text: string };
@@ -532,9 +517,9 @@ export default function App() {
       autoCleanLoggedRef.current.add('loyalty-tier');
       addLog({ variant: 'stream', text: 'Loyalty tier synced from loyalty platform — 142,340 records · 98.7% confidence' });
     }
-    if (sp >= 65 && !autoCleanLoggedRef.current.has('doc-formatting')) {
-      autoCleanLoggedRef.current.add('doc-formatting');
-      addLog({ variant: 'stream', text: 'Travel document field formatting corrected — 86,127 records · 99.8% confidence' });
+    if (sp >= 65 && !autoCleanLoggedRef.current.has('classification')) {
+      autoCleanLoggedRef.current.add('classification');
+      addLog({ variant: 'stream', text: 'Data sensitivity tagging complete — 1.2M records classified · completeness tiers assigned' });
     }
   }, [streamProgress, agentState]);
 
@@ -2208,37 +2193,53 @@ export default function App() {
                                         </div>
                                       </div>
 
-                                      {/* Auto-cleaning rules */}
+                                      {/* Cleansing — applied automatically */}
                                       <div className="p-5 border-b border-border">
                                         <div className="flex items-center gap-2 mb-1">
                                           <ShieldCheck className="size-4 text-[#059669]" strokeWidth={2} />
-                                          <h3 className="text-[13px] font-medium text-foreground">
-                                            Applied automatically — no approval needed
-                                          </h3>
+                                          <h3 className="text-[13px] font-medium text-foreground">Cleansed automatically — no approval needed</h3>
                                         </div>
-                                        <p className="text-[11px] text-foreground/50 mb-3 ml-6">All 98–99%+ confidence. Structural and formatting issues only — no passenger merges, no deletions, no identity changes.</p>
+                                        <p className="text-[11px] text-foreground/50 mb-3 ml-6">98–99%+ confidence. Structural and formatting fixes only — no merges, no deletions, no identity changes.</p>
                                         <div className="space-y-3">
                                           <div>
                                             <div className="flex items-start gap-2 text-[12px] mb-1">
                                               <CheckCircle className="size-3.5 text-[#059669] mt-0.5 shrink-0" strokeWidth={2} />
                                               <span className="text-foreground/80">Fix date formats <span className="text-foreground/40 font-normal">(e.g. "21-03-1985" → "1985-03-21")</span></span>
                                             </div>
-                                            <div className="ml-6 text-[11px] text-foreground/50">~228K records in preliminary scan · 99.1% confidence</div>
+                                            <div className="ml-6 text-[11px] text-foreground/50">~228K records · 99.1% confidence</div>
                                           </div>
                                           <div>
                                             <div className="flex items-start gap-2 text-[12px] mb-1">
                                               <CheckCircle className="size-3.5 text-[#059669] mt-0.5 shrink-0" strokeWidth={2} />
-                                              <span className="text-foreground/80">Update loyalty tier to match the loyalty platform <span className="text-foreground/40 font-normal">(e.g. Silver → Gold where loyalty system is authoritative)</span></span>
+                                              <span className="text-foreground/80">Update loyalty tier to match loyalty platform <span className="text-foreground/40 font-normal">(e.g. Silver → Gold)</span></span>
                                             </div>
-                                            <div className="ml-6 text-[11px] text-foreground/50">~142K records in preliminary scan · 98.7% confidence</div>
+                                            <div className="ml-6 text-[11px] text-foreground/50">~142K records · 98.7% confidence</div>
                                           </div>
-                                          <div>
-                                            <div className="flex items-start gap-2 text-[12px] mb-1">
-                                              <CheckCircle className="size-3.5 text-[#059669] mt-0.5 shrink-0" strokeWidth={2} />
-                                              <span className="text-foreground/80">Correct travel document field formatting <span className="text-foreground/40 font-normal">(e.g. "GBRGB123456" → "GBR GB123456")</span></span>
+                                        </div>
+                                      </div>
+
+                                      {/* Classification — applied automatically */}
+                                      <div className="p-5 border-b border-border">
+                                        <div className="flex items-center gap-2 mb-1">
+                                          <ListChecks className="size-4 text-[#2563eb]" strokeWidth={2} />
+                                          <h3 className="text-[13px] font-medium text-foreground">Classified automatically — no approval needed</h3>
+                                        </div>
+                                        <p className="text-[11px] text-foreground/50 mb-3 ml-6">Labels assigned to every record. No fields are changed — classification informs what processing applies downstream.</p>
+                                        <div className="space-y-3">
+                                          {CLASSIFICATION_RULES.map((rule, i) => (
+                                            <div key={i}>
+                                              <div className="flex items-start gap-2 text-[12px] mb-1">
+                                                <CheckCircle className="size-3.5 text-[#2563eb] mt-0.5 shrink-0" strokeWidth={2} />
+                                                <span className="text-foreground/80">{rule.label}</span>
+                                              </div>
+                                              <div className="ml-6 text-[11px] text-foreground/50">{rule.detail}</div>
+                                              <div className="ml-6 mt-1 flex items-center gap-1.5">
+                                                <span className="px-1.5 py-0.5 bg-[#fef2f2] border border-[#fecaca] rounded font-mono text-[#dc2626] text-[10px]">{rule.example[0]}</span>
+                                                <span className="text-foreground/30 text-[10px]">→</span>
+                                                <span className="px-1.5 py-0.5 bg-[#eff6ff] border border-[#bfdbfe] rounded font-mono text-[#2563eb] text-[10px]">{rule.example[1]}</span>
+                                              </div>
                                             </div>
-                                            <div className="ml-6 text-[11px] text-foreground/50">~86K records in preliminary scan · 99.8% confidence</div>
-                                          </div>
+                                          ))}
                                         </div>
                                       </div>
 
@@ -2246,49 +2247,23 @@ export default function App() {
                                       <div className="p-5 border-b border-border">
                                         <div className="flex items-center gap-2 mb-1">
                                           <Pause className="size-4 text-[#d97706]" strokeWidth={2} />
-                                          <h3 className="text-[13px] font-medium text-foreground">
-                                            May pause for your decision
-                                          </h3>
+                                          <h3 className="text-[13px] font-medium text-foreground">May pause for your decision</h3>
                                         </div>
-                                        <p className="text-[11px] text-foreground/50 mb-3 ml-6">The agent will flag ambiguous cases as it finds them — it cannot predict all of them in advance. Based on a preliminary scan, patterns like the ones below are likely to come up. Each will be explained in full before you're asked to act.</p>
+                                        <p className="text-[11px] text-foreground/50 mb-3 ml-6">Patterns where confidence falls below threshold. Each case will be explained in full before you're asked to act.</p>
                                         <div className="space-y-4">
                                           <div>
                                             <div className="flex items-start gap-2 text-[12px] mb-1">
                                               <AlertTriangle className="size-3.5 text-[#d97706] mt-0.5 shrink-0" strokeWidth={2} />
                                               <span className="text-foreground/80 font-medium">The same passenger appearing across multiple systems with no matching field</span>
                                             </div>
-                                            <div className="ml-6 text-[11px] text-foreground/50 leading-relaxed">
-                                              Seen in preliminary scan · resolved by inference from behavioural signals and service notes, not deterministic fields
-                                            </div>
+                                            <div className="ml-6 text-[11px] text-foreground/50 leading-relaxed">Seen in preliminary scan · resolved by inference from behavioural signals and service notes</div>
                                           </div>
                                           <div>
                                             <div className="flex items-start gap-2 text-[12px] mb-1">
                                               <AlertTriangle className="size-3.5 text-[#d97706] mt-0.5 shrink-0" strokeWidth={2} />
                                               <span className="text-foreground/80 font-medium">Nationality unclear from the travel document on file</span>
                                             </div>
-                                            <div className="ml-6 text-[11px] text-foreground/50 leading-relaxed">
-                                              Seen in preliminary scan · stateless documents, expired visas, dual nationality — policy decision needed
-                                            </div>
-                                          </div>
-                                        </div>
-                                      </div>
-
-                                      {/* Edge cases requiring manual review */}
-                                      <div className="p-5 border-b border-border">
-                                        <div className="flex items-center gap-2 mb-1">
-                                          <Shield className="size-4 text-[#7c3aed]" strokeWidth={2} />
-                                          <h3 className="text-[13px] font-medium text-foreground">
-                                            Some records may be escalated — agent cannot resolve them
-                                          </h3>
-                                        </div>
-                                        <p className="text-[11px] text-foreground/50 mb-3 ml-6">If records are found that no automated action can safely resolve, they will be isolated and flagged for the appropriate team. No changes will be made to them.</p>
-                                        <div>
-                                          <div className="flex items-start gap-2 text-[12px] mb-1">
-                                            <Shield className="size-3.5 text-[#7c3aed] mt-0.5 shrink-0" strokeWidth={2} />
-                                            <span className="text-foreground/80 font-medium">Minor passengers with incomplete or expired guardian consent</span>
-                                          </div>
-                                          <div className="ml-6 text-[11px] text-foreground/50 leading-relaxed">
-                                            Seen in preliminary scan · GDPR Article 8 and aviation duty-of-care obligations require human verification — cannot be resolved automatically
+                                            <div className="ml-6 text-[11px] text-foreground/50 leading-relaxed">Seen in preliminary scan · stateless documents, expired visas — policy decision needed</div>
                                           </div>
                                         </div>
                                       </div>
