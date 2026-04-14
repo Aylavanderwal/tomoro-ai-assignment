@@ -311,52 +311,24 @@ export default function App() {
     return next;
   });
 
-  // Request notification permission as soon as the agent starts running
+  // Request notification permission when agent starts, so it's ready when blocking happens
   useEffect(() => {
     if (agentState === 'running' && 'Notification' in window && Notification.permission === 'default') {
       Notification.requestPermission();
     }
   }, [agentState]);
 
-  // Notification system - Three levels of user awareness
+  // Send a browser notification when the agent blocks
   useEffect(() => {
-    // Notify when agent is truly blocked (ran out of safe work)
-    if (agentState === 'blocked') {
-      // LEVEL 1: In-product toast notification
-      setToastMessage('Agent blocked — decisions needed to continue');
-      setShowToast(true);
-      setTimeout(() => setShowToast(false), 5000);
-
-      // LEVEL 2: Tab title update for background awareness
-      document.title = '⚠ Action required — Data remediation';
-
-      // LEVEL 3: Browser system notification
-      if ('Notification' in window && Notification.permission === 'granted') {
-        new Notification('AeroData — Agent blocked', {
-          body: 'All remaining records require your input before processing can resume.',
-          icon: '/favicon.ico',
-          tag: 'ai-remediation-blocked',
-          requireInteraction: true,
-        });
-      }
-
-      // LEVEL 4: Browser alert — for when the tab is in the background
-      setTimeout(() => {
-        window.alert('AeroData Agent — input required\n\nThe remediation agent is blocked and cannot continue without your input.\n\nReturn to the app to review the queued decisions.');
-      }, 100);
-    } else if (agentState === 'running' && pendingDecisions.length > 0) {
-      document.title = `(${pendingDecisions.length}) Decision${pendingDecisions.length > 1 ? 's' : ''} queued — Data remediation`;
-    } else {
-      document.title = 'Passenger Data Operations';
-    }
+    if (agentState !== 'blocked') return;
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    new Notification('AeroData — Agent blocked', {
+      body: 'Your input is needed before processing can resume.',
+      icon: '/favicon.ico',
+      tag: 'ai-remediation-blocked',
+      requireInteraction: true,
+    });
   }, [agentState]);
-
-  // Request notification permission on mount
-  useEffect(() => {
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
-  }, []);
 
   // Derived decision state — must be before activeTourStepId
   const pendingDecisions = decisions.filter(d => d.status === 'pending');
