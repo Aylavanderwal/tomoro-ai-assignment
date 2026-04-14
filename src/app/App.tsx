@@ -249,6 +249,7 @@ export default function App() {
     setActivityLog(prev => [{ ...entry, id: `log-${Date.now()}-${Math.random()}`, time: new Date() }, ...prev]);
   }, []);
   // Tour overlay state
+  const [tourEnabled, setTourEnabled] = useState<boolean | null>(null); // null = not yet decided
   const [tourVisible, setTourVisible] = useState<boolean>(false);
   const [tourFading, setTourFading] = useState<boolean>(false);
   const [tourWords, setTourWords] = useState<string[]>([]);
@@ -387,12 +388,13 @@ export default function App() {
   }, [showSampleModal, expandedDataset, agentState, showAdjustRules, expandedDecisionDetails, pendingDecisions, hasSeenFailure, resolvedDecisionCount]);
 
   useEffect(() => {
+    if (!tourEnabled) return;
     if (!activeTourStepId) return;
     if (activeTourStepId === lastTourStepRef.current) return;
     lastTourStepRef.current = activeTourStepId;
     const step = TOUR_STEPS.find(s => s.id === activeTourStepId);
     if (step) runTourStep(step.text);
-  }, [activeTourStepId, runTourStep]);
+  }, [activeTourStepId, runTourStep, tourEnabled]);
 
   // Undo countdown after approving a policy — ticks down, then clears
   useEffect(() => {
@@ -1214,7 +1216,7 @@ export default function App() {
     <div className="h-screen flex bg-[#fafafa]">
       {/* Tour voiceover bubble */}
       <style>{`@keyframes twFadeWord { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }`}</style>
-      {tourVisible && (
+      {tourEnabled && tourVisible && (
         <div
           className="fixed z-[70] flex items-end gap-3 cursor-grab active:cursor-grabbing select-none"
           style={{
@@ -1269,6 +1271,36 @@ export default function App() {
               ))}
             </p>
             <div className="mt-2 text-[10px] text-white/25 text-right">click to dismiss</div>
+          </div>
+        </div>
+      )}
+
+      {/* Tour opt-in prompt */}
+      {tourEnabled === null && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/30 backdrop-blur-sm">
+          <div className="bg-background border border-border rounded-xl shadow-2xl w-[340px] p-6">
+            <div className="flex items-center gap-2.5 mb-2">
+              <Sparkles className="size-4 text-[#2563eb] shrink-0" strokeWidth={2} />
+              <h2 className="text-[14px] font-semibold text-foreground">Would you like a guided tour?</h2>
+            </div>
+            <p className="text-[12px] text-foreground/60 mb-5 leading-relaxed">
+              I'll walk you through each step as you explore — explaining what the agent is doing and why.
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setTourEnabled(true)}
+                className="flex-1 px-4 py-2.5 text-white rounded-lg text-[13px] font-medium transition-all hover:shadow-md"
+                style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}
+              >
+                Yes, guide me
+              </button>
+              <button
+                onClick={() => setTourEnabled(false)}
+                className="flex-1 px-4 py-2.5 bg-white text-foreground border border-border rounded-lg text-[13px] font-medium hover:bg-accent transition-colors"
+              >
+                No thanks
+              </button>
+            </div>
           </div>
         </div>
       )}
