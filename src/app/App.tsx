@@ -1247,28 +1247,28 @@ export default function App() {
         </div>
       )}
 
-      {/* Tour opt-in prompt */}
+      {/* Tour opt-in prompt — bottom-left card, no overlay */}
       {tourEnabled === null && (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/30 backdrop-blur-sm">
-          <div className="bg-background border border-border rounded-xl shadow-2xl w-[340px] p-6">
-            <div className="flex items-center gap-2.5 mb-2">
-              <Sparkles className="size-4 text-[#2563eb] shrink-0" strokeWidth={2} />
-              <h2 className="text-[14px] font-semibold text-foreground">Would you like a guided tour?</h2>
-            </div>
-            <p className="text-[12px] text-foreground/60 mb-5 leading-relaxed">
-              I'll walk you through each step as you explore — explaining what the agent is doing and why.
+        <div className="fixed bottom-4 left-4 z-[80] w-72 bg-background border border-border rounded-lg shadow-lg overflow-hidden">
+          <div className="px-4 py-3 border-b border-border flex items-center gap-2">
+            <Sparkles className="size-3.5 text-[#2563eb] shrink-0" strokeWidth={2} />
+            <span className="text-[12px] font-medium text-foreground">Guided tour available</span>
+          </div>
+          <div className="px-4 py-3">
+            <p className="text-[11px] text-foreground/60 mb-3 leading-relaxed">
+              Walk through the demo with narration at each step, or explore on your own.
             </p>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => setTourEnabled(true)}
-                className="flex-1 px-4 py-2.5 text-white rounded-lg text-[13px] font-medium transition-all hover:shadow-md"
+                className="flex-1 px-3 py-1.5 text-white rounded text-[12px] font-medium transition-colors"
                 style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}
               >
                 Yes, guide me
               </button>
               <button
                 onClick={() => setTourEnabled(false)}
-                className="flex-1 px-4 py-2.5 bg-white text-foreground border border-border rounded-lg text-[13px] font-medium hover:bg-accent transition-colors"
+                className="flex-1 px-3 py-1.5 bg-white text-foreground/60 border border-border rounded text-[12px] font-medium hover:text-foreground hover:bg-accent transition-colors"
               >
                 No thanks
               </button>
@@ -1462,50 +1462,34 @@ export default function App() {
         </div>
       )}
 
-      {/* Blocked modal — full overlay, fires on both blocks */}
+      {/* Blocked notification — bottom-right toast */}
       {showBlockedModal && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-background rounded-xl border border-border shadow-2xl w-full max-w-sm mx-4 overflow-hidden animate-in zoom-in-95 duration-200">
-            {/* Header stripe */}
-            <div className="bg-[#d97706] px-5 py-3 flex items-center gap-3">
-              <div className="size-8 rounded-full bg-white/20 flex items-center justify-center shrink-0">
-                <Pause className="size-4 text-white" strokeWidth={2.5} />
-              </div>
-              <div>
-                <div className="text-[13px] font-semibold text-white">Agent requires your input</div>
-                <div className="text-[11px] text-white/70">AeroData · Passenger Master Record</div>
-              </div>
+        <div className="fixed bottom-4 right-4 z-[60] w-72 bg-background border border-border rounded-lg shadow-lg overflow-hidden animate-in slide-in-from-bottom-2 fade-in duration-200">
+          <div className="px-4 py-3 border-b border-[#fde68a] bg-[#fffbeb] flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Pause className="size-3.5 text-[#d97706] shrink-0" strokeWidth={2} />
+              <span className="text-[12px] font-medium text-[#92400e]">Agent blocked — input needed</span>
             </div>
-            {/* Body */}
-            <div className="px-5 py-4">
-              <p className="text-[13px] text-foreground/80 leading-relaxed mb-4">
-                The remediation agent has processed all records it can handle automatically and is now blocked. It cannot continue until you review the queued decisions.
-              </p>
-              <div className="p-3 bg-[#fef3c7] rounded-lg border border-[#fde68a] mb-4">
-                <div className="text-[12px] font-medium text-[#92400e] mb-1">
-                  {pendingDecisions.length} decision{pendingDecisions.length !== 1 ? 's' : ''} waiting
-                </div>
-                <div className="text-[11px] text-[#78350f]">
-                  {pendingDecisions.map(d => d.label).join(' · ')}
-                </div>
-              </div>
-              <button
-                onClick={() => {
-                  setShowBlockedModal(false);
-                  setExpandedDataset('passenger-master');
-                }}
-                className="w-full py-2.5 rounded-lg text-[13px] font-medium text-white"
-                style={{ background: 'linear-gradient(135deg, #d97706 0%, #b45309 100%)' }}
-              >
-                Review decisions →
-              </button>
-              <button
-                onClick={() => setShowBlockedModal(false)}
-                className="w-full mt-2 py-2 text-[12px] text-foreground/50 hover:text-foreground/70"
-              >
-                Dismiss
-              </button>
-            </div>
+            <button onClick={() => setShowBlockedModal(false)} className="text-foreground/30 hover:text-foreground/60">
+              <svg className="size-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          <div className="px-4 py-3">
+            <p className="text-[11px] text-foreground/60 mb-3 leading-relaxed">
+              {pendingDecisions.length} decision{pendingDecisions.length !== 1 ? 's' : ''} queued — the agent cannot continue until you review them.
+            </p>
+            <button
+              onClick={() => {
+                setShowBlockedModal(false);
+                setExpandedDataset('passenger-master');
+              }}
+              className="w-full py-2 rounded text-[12px] font-medium text-white transition-colors"
+              style={{ background: 'linear-gradient(135deg, #d97706 0%, #b45309 100%)' }}
+            >
+              Review decisions
+            </button>
           </div>
         </div>
       )}
