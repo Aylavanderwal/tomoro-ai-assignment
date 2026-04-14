@@ -470,7 +470,10 @@ export default function App() {
     prevAgentStateRef.current = agentState;
     if (prev === agentState) return;
     if (prev === 'proposed' && agentState === 'running') {
-      autoCleanLoggedRef.current = new Set();
+      autoCleanLoggedRef.current = new Set(['date-formats-start', 'loyalty-tier-start', 'classification-start']);
+      addLog({ variant: 'progress', text: 'Processing: Data classification · completeness tiers and sensitivity tagging · 1.2M records' });
+      addLog({ variant: 'progress', text: 'Processing: Loyalty tier sync from loyalty platform · 142,340 records queued' });
+      addLog({ variant: 'progress', text: 'Processing: Fix date formats · 228,467 records identified' });
       addLog({ variant: 'start', text: `Agent started · 1.2M records queued · ${AUTO_CLEAN_RULES.filter((_, i) => !disabledAutoRules.has(i)).length} auto-clean rules active` });
     } else if (agentState === 'blocked') {
       addLog({ variant: 'block', text: 'Agent blocked · processed all safe work · waiting for decisions' });
@@ -513,25 +516,13 @@ export default function App() {
   useEffect(() => {
     if (agentState !== 'running') return;
     const sp = streamProgress['low-risk'];
-    if (sp >= 0.5 && !autoCleanLoggedRef.current.has('date-formats-start')) {
-      autoCleanLoggedRef.current.add('date-formats-start');
-      addLog({ variant: 'progress', text: 'Processing: Fix date formats · 228,467 records identified' });
-    }
     if (sp >= 10 && !autoCleanLoggedRef.current.has('date-formats')) {
       autoCleanLoggedRef.current.add('date-formats');
       addLog({ variant: 'stream', text: 'Complete: Date format standardisation applied — 228,467 records · 99.1% confidence' });
     }
-    if (sp >= 12 && !autoCleanLoggedRef.current.has('loyalty-tier-start')) {
-      autoCleanLoggedRef.current.add('loyalty-tier-start');
-      addLog({ variant: 'progress', text: 'Processing: Loyalty tier sync from loyalty platform · 142,340 records queued' });
-    }
     if (sp >= 22 && !autoCleanLoggedRef.current.has('loyalty-tier')) {
       autoCleanLoggedRef.current.add('loyalty-tier');
       addLog({ variant: 'stream', text: 'Complete: Loyalty tier synced from loyalty platform — 142,340 records · 98.7% confidence' });
-    }
-    if (sp >= 25 && !autoCleanLoggedRef.current.has('classification-start')) {
-      autoCleanLoggedRef.current.add('classification-start');
-      addLog({ variant: 'progress', text: 'Processing: Data classification · completeness tiers and sensitivity tagging · 1.2M records' });
     }
     if (sp >= 40 && !autoCleanLoggedRef.current.has('classification')) {
       autoCleanLoggedRef.current.add('classification');
