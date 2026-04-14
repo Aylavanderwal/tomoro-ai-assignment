@@ -35,6 +35,7 @@ import {
   Check,
   Edit3,
   SkipForward,
+  Square,
 } from 'lucide-react';
 
 type Decision = {
@@ -204,7 +205,8 @@ type Dataset = {
 export default function App() {
   const [selectedTab, setSelectedTab] = useState<string>('passengers');
   const [expandedDataset, setExpandedDataset] = useState<string | null>(null);
-  const [agentState, setAgentState] = useState<'proposed' | 'running' | 'blocked' | 'failed' | 'completed'>('proposed');
+  const [agentState, setAgentState] = useState<'proposed' | 'running' | 'blocked' | 'failed' | 'stopped' | 'completed'>('proposed');
+  const [stoppedAtProgress, setStoppedAtProgress] = useState<number>(0);
   const [streamProgress, setStreamProgress] = useState<Record<string, number>>(
     Object.fromEntries(STREAMS.map(s => [s.id, 0]))
   );
@@ -481,6 +483,8 @@ export default function App() {
       addLog({ variant: 'resume', text: 'Agent resumed · processing continuing from checkpoint' });
     } else if (agentState === 'completed') {
       addLog({ variant: 'complete', text: 'Run complete · all records processed' });
+    } else if (agentState === 'stopped') {
+      addLog({ variant: 'block', text: `Agent stopped by you at ${Math.round(stoppedAtProgress)}% · checkpoint saved · safe to resume` });
     } else if (agentState === 'failed') {
       addLog({ variant: 'error', text: `Agent stopped — write conflict at ${Math.round(failedAtProgress)}% · safe to retry from checkpoint` });
     }
@@ -537,11 +541,11 @@ export default function App() {
         name: 'Passenger Master',
         domain: 'Customer',
         owner: 'Data Operations',
-        status: agentState === 'blocked' ? 'Needs input' : agentState === 'running' ? 'Processing' : agentState === 'completed' ? 'Completed' : 'Needs attention',
+        status: agentState === 'blocked' ? 'Needs input' : agentState === 'running' ? 'Processing' : agentState === 'completed' ? 'Completed' : agentState === 'stopped' ? 'Stopped' : 'Needs attention',
         recordsImpacted: '1.2M',
         lastUpdated: '2 min ago',
-        statusColor: agentState === 'blocked' ? 'text-[#d97706]' : agentState === 'running' ? 'text-[#2563eb]' : agentState === 'completed' ? 'text-[#059669]' : 'text-[#d97706]',
-        bgColor: agentState === 'blocked' ? 'bg-[#fef3c7]' : agentState === 'running' ? 'bg-[#dbeafe]' : agentState === 'completed' ? 'bg-[#d1fae5]' : 'bg-[#fef3c7]',
+        statusColor: agentState === 'blocked' ? 'text-[#d97706]' : agentState === 'running' ? 'text-[#2563eb]' : agentState === 'completed' ? 'text-[#059669]' : agentState === 'stopped' ? 'text-[#6b7280]' : 'text-[#d97706]',
+        bgColor: agentState === 'blocked' ? 'bg-[#fef3c7]' : agentState === 'running' ? 'bg-[#dbeafe]' : agentState === 'completed' ? 'bg-[#d1fae5]' : agentState === 'stopped' ? 'bg-[#f3f4f6]' : 'bg-[#fef3c7]',
       },
       {
         id: 'loyalty-profiles',
@@ -1870,6 +1874,8 @@ export default function App() {
                                               ? 'bg-[#3b82f6] border-[#3b82f6] ring-4 ring-[#3b82f6]/20'
                                               : agentState === 'blocked'
                                               ? 'bg-[#d97706] border-[#d97706] ring-4 ring-[#d97706]/20'
+                                              : agentState === 'stopped'
+                                              ? 'bg-[#6b7280] border-[#6b7280]'
                                               : 'bg-background border-border'
                                           }`}
                                         >
@@ -1879,6 +1885,8 @@ export default function App() {
                                             <div className="size-2.5 rounded-full bg-white animate-pulse" />
                                           ) : agentState === 'blocked' ? (
                                             <Pause className="size-4 text-white" strokeWidth={2.5} />
+                                          ) : agentState === 'stopped' ? (
+                                            <Square className="size-3.5 text-white" strokeWidth={2.5} />
                                           ) : (
                                             <Sparkles className="size-4 text-muted-foreground" strokeWidth={2} />
                                           )}
@@ -1894,6 +1902,7 @@ export default function App() {
                                               ? 'Agent struggling — decisions unresolved'
                                               : `Agent blocked — ${pendingDecisions.length} decision${pendingDecisions.length > 1 ? 's' : ''} required to continue`
                                             )}
+                                            {agentState === 'stopped' && 'Agent stopped by you'}
                                             {agentState === 'completed' && 'Remediation Complete'}
                                           </div>
                                           <div className="text-[11px] text-muted-foreground mt-0.5">
@@ -1901,16 +1910,31 @@ export default function App() {
                                             {agentState === 'running' && pendingDecisions.length === 0 && `Processing 1.2M records · ${Math.round(progress * 10) / 10}% complete`}
                                             {agentState === 'running' && pendingDecisions.length > 0 && `${Math.round(progress * 10) / 10}% complete · Processing unaffected records while decisions queue`}
                                             {agentState === 'blocked' && `Stopped at ${Math.round(progress * 10) / 10}% · All remaining records require your input`}
+                                            {agentState === 'stopped' && `Paused at ${Math.round(stoppedAtProgress * 10) / 10}% · checkpoint saved · resume any time`}
                                             {agentState === 'completed' && `Finished at 14:32 · Runtime: 3h 47m · All issues resolved`}
                                           </div>
                                         </div>
                                       </div>
 
+                                      {/* Stop button — always available when running */}
+                                      {agentState === 'running' && (
+                                        <button
+                                          onClick={() => {
+                                            setStoppedAtProgress(progress);
+                                            setAgentState('stopped');
+                                          }}
+                                          className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-foreground/50 hover:text-foreground border border-border hover:border-foreground/30 rounded transition-colors"
+                                        >
+                                          <Square className="size-3" strokeWidth={2.5} />
+                                          Stop agent
+                                        </button>
+                                      )}
+
                                       {/* Dev mode controls */}
                                       {devMode && (
                                         <div className="flex items-center gap-2">
                                           <span className="text-[10px] text-muted-foreground">Dev:</span>
-                                          {(['proposed', 'running', 'blocked', 'failed', 'completed'] as const).map((state) => (
+                                          {(['proposed', 'running', 'blocked', 'stopped', 'failed', 'completed'] as const).map((state) => (
                                             <button
                                               key={state}
                                               onClick={() => {
@@ -2947,6 +2971,70 @@ export default function App() {
                                             Roll back all changes
                                           </button>
                                           <span className="text-[11px] text-foreground/40 ml-auto">Rollback restores {Math.round(failedAtProgress * 12000).toLocaleString()} records to pre-run state</span>
+                                        </div>
+                                      </div>
+                                    </>
+                                  )}
+
+                                  {/* STATE: STOPPED — user-initiated halt */}
+                                  {agentState === 'stopped' && !showResumeView && (
+                                    <>
+                                      {/* Header */}
+                                      <div className="p-5 border-b border-border bg-[#f9fafb]">
+                                        <div className="flex items-center gap-2 mb-2">
+                                          <Square className="size-4 text-[#6b7280]" strokeWidth={2} />
+                                          <h3 className="text-[14px] font-medium text-foreground">Agent stopped by you</h3>
+                                        </div>
+                                        <div className="text-[12px] text-foreground/60">
+                                          Stopped at {Math.round(stoppedAtProgress)}% · {Math.round(stoppedAtProgress * 12000).toLocaleString()} records processed · checkpoint saved
+                                        </div>
+                                      </div>
+
+                                      {/* Progress summary */}
+                                      <div className="p-5 border-b border-border">
+                                        <h3 className="text-[13px] font-medium text-foreground mb-3">Where things stand</h3>
+                                        <div className="space-y-3">
+                                          <div className="flex items-start gap-3 text-[12px]">
+                                            <CheckCircle className="size-4 text-[#059669] mt-0.5 shrink-0" strokeWidth={2} />
+                                            <div>
+                                              <div className="font-medium text-foreground">Processed and committed</div>
+                                              <div className="text-foreground/60 mt-0.5">{Math.round(stoppedAtProgress * 12000).toLocaleString()} records — all applied changes are intact and reversible</div>
+                                            </div>
+                                          </div>
+                                          <div className="flex items-start gap-3 text-[12px]">
+                                            <Clock className="size-4 text-foreground/30 mt-0.5 shrink-0" strokeWidth={2} />
+                                            <div>
+                                              <div className="font-medium text-foreground/60">Not yet processed</div>
+                                              <div className="text-foreground/40 mt-0.5">{(1200000 - Math.round(stoppedAtProgress * 12000)).toLocaleString()} records untouched — no changes made to these</div>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      </div>
+
+                                      {/* Actions */}
+                                      <div className="p-5">
+                                        <div className="flex items-center gap-3">
+                                          <button
+                                            onClick={() => setAgentState('running')}
+                                            className="px-5 py-2.5 text-white rounded text-[13px] font-medium transition-all hover:shadow-md"
+                                            style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}
+                                          >
+                                            <div className="flex items-center gap-2">
+                                              <Play className="size-4" strokeWidth={2} />
+                                              <span>Resume from checkpoint</span>
+                                            </div>
+                                          </button>
+                                          <button
+                                            onClick={() => {
+                                              setAgentState('proposed');
+                                              setStreamProgress(Object.fromEntries(STREAMS.map(s => [s.id, 0])));
+                                              setDecisions([]);
+                                              setStoppedAtProgress(0);
+                                            }}
+                                            className="px-4 py-2 bg-white text-foreground border border-border rounded text-[13px] font-medium hover:bg-accent"
+                                          >
+                                            Discard and start over
+                                          </button>
                                         </div>
                                       </div>
                                     </>
