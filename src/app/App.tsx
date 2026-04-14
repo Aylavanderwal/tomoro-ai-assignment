@@ -2112,56 +2112,13 @@ export default function App() {
                                       <div className="p-5 border-b border-border flex items-center justify-between" data-tour-anchor="tour-adjust-rules">
                                         <div>
                                           <h3 className="text-[14px] font-medium text-foreground">Adjust approach</h3>
-                                          <p className="text-[12px] text-foreground/50 mt-0.5">Choose when the agent interrupts you, and which patterns always require your sign-off.</p>
+                                          <p className="text-[12px] text-foreground/50 mt-0.5">Check the situations where you want the agent to stop and wait for your input. Everything else runs automatically.</p>
                                         </div>
                                         <button onClick={() => setShowAdjustRules(false)} className="text-[12px] text-foreground/50 hover:text-foreground font-medium shrink-0 ml-4">← Back</button>
                                       </div>
 
-                                      {/* Section 1: Review granularity */}
+                                      {/* Escalation triggers — the only control */}
                                       <div className="p-5 border-b border-border">
-                                        <h4 className="text-[12px] font-semibold text-foreground uppercase tracking-wide mb-1">When do you want to be interrupted?</h4>
-                                        <p className="text-[11px] text-foreground/50 mb-3">This controls whether the agent pauses mid-run or presents everything at the end.</p>
-                                        <div className="space-y-2">
-                                          {([
-                                            {
-                                              value: 'every-case',
-                                              label: 'Every flagged case',
-                                              desc: 'Agent pauses each time it finds something ambiguous. You decide one case at a time, while the run is in progress.',
-                                            },
-                                            {
-                                              value: 'exceptions-only',
-                                              label: 'Exceptions only',
-                                              desc: 'Agent runs continuously and only interrupts you when a case matches one of your escalation rules. Everything else carries on.',
-                                            },
-                                            {
-                                              value: 'batch-summaries',
-                                              label: 'Batch summaries',
-                                              desc: 'Agent completes the full run without stopping. All ambiguous cases are grouped and presented at the end for a single review session.',
-                                            },
-                                          ] as const).map(opt => (
-                                            <button
-                                              key={opt.value}
-                                              onClick={() => setReviewGranularity(opt.value)}
-                                              className={`w-full text-left px-3 py-3 rounded border transition-colors ${reviewGranularity === opt.value ? 'border-[#3b82f6] bg-[#eff6ff]' : 'border-border bg-background hover:bg-accent'}`}
-                                            >
-                                              <div className="flex items-start gap-2.5">
-                                                <div className={`size-3.5 rounded-full border-2 shrink-0 flex items-center justify-center mt-0.5 ${reviewGranularity === opt.value ? 'border-[#3b82f6]' : 'border-foreground/20'}`}>
-                                                  {reviewGranularity === opt.value && <div className="size-1.5 rounded-full bg-[#3b82f6]" />}
-                                                </div>
-                                                <div>
-                                                  <div className={`text-[12px] font-medium mb-0.5 ${reviewGranularity === opt.value ? 'text-[#1d4ed8]' : 'text-foreground'}`}>{opt.label}</div>
-                                                  <div className="text-[11px] text-foreground/50 leading-relaxed">{opt.desc}</div>
-                                                </div>
-                                              </div>
-                                            </button>
-                                          ))}
-                                        </div>
-                                      </div>
-
-                                      {/* Section 2: Escalation triggers */}
-                                      <div className="p-5 border-b border-border">
-                                        <h4 className="text-[12px] font-semibold text-foreground uppercase tracking-wide mb-1">Always stop and ask for these</h4>
-                                        <p className="text-[11px] text-foreground/50 mb-3">These override the setting above — the agent will always pause on these patterns regardless of confidence.</p>
                                         <div className="space-y-2">
                                           {ESCALATION_TRIGGERS.map(trigger => {
                                             const isEnabled = !disabledEscalation.has(trigger.id);
@@ -2169,28 +2126,48 @@ export default function App() {
                                               <button
                                                 key={trigger.id}
                                                 onClick={() => toggleEscalation(trigger.id)}
-                                                className="w-full text-left flex items-center gap-2.5 px-3 py-2 rounded border border-border hover:bg-accent transition-colors"
+                                                className={`w-full text-left flex items-center gap-3 px-3 py-2.5 rounded border transition-colors ${isEnabled ? 'border-border bg-background hover:bg-accent' : 'border-border bg-[#fafafa]'}`}
                                               >
                                                 <div className={`size-4 rounded border-2 flex items-center justify-center shrink-0 transition-colors ${isEnabled ? 'border-[#3b82f6] bg-[#3b82f6]' : 'border-foreground/20 bg-transparent'}`}>
                                                   {isEnabled && <Check className="size-2.5 text-white" strokeWidth={3} />}
                                                 </div>
-                                                <span className={`text-[12px] ${isEnabled ? 'text-foreground' : 'text-foreground/40 line-through'}`}>{trigger.label}</span>
+                                                <span className={`text-[12px] font-medium ${isEnabled ? 'text-foreground' : 'text-foreground/35'}`}>{trigger.label}</span>
                                               </button>
                                             );
                                           })}
                                         </div>
                                         {disabledEscalation.size > 0 && (
-                                          <p className="text-[11px] text-[#d97706] mt-2.5">
-                                            {disabledEscalation.size} trigger{disabledEscalation.size > 1 ? 's' : ''} disabled — the agent will act without asking on these patterns.
+                                          <p className="text-[11px] text-[#d97706] mt-3">
+                                            {disabledEscalation.size} situation{disabledEscalation.size > 1 ? 's' : ''} unchecked — the agent will handle these without asking.
                                           </p>
                                         )}
+                                      </div>
+
+                                      {/* Batch mode toggle */}
+                                      <div className="p-5 border-b border-border">
+                                        <button
+                                          onClick={() => setReviewGranularity(prev => prev === 'batch-summaries' ? 'exceptions-only' : 'batch-summaries')}
+                                          className="w-full text-left flex items-start gap-3"
+                                        >
+                                          <div className={`mt-0.5 w-8 h-4.5 rounded-full shrink-0 relative transition-colors ${reviewGranularity === 'batch-summaries' ? 'bg-[#3b82f6]' : 'bg-[#d1d5db]'}`} style={{ height: '18px', width: '32px' }}>
+                                            <div className={`absolute top-0.5 size-3.5 rounded-full bg-white shadow transition-transform ${reviewGranularity === 'batch-summaries' ? 'translate-x-[15px]' : 'translate-x-0.5'}`} />
+                                          </div>
+                                          <div>
+                                            <div className="text-[12px] font-medium text-foreground">Don't interrupt during the run</div>
+                                            <div className="text-[11px] text-foreground/50 mt-0.5 leading-relaxed">
+                                              {reviewGranularity === 'batch-summaries'
+                                                ? 'The agent will complete the full run first. All cases that match your checklist above will be grouped and presented at the end for review.'
+                                                : 'The agent will pause mid-run each time it hits a case that matches your checklist above.'}
+                                            </div>
+                                          </div>
+                                        </button>
                                       </div>
 
                                       {/* Footer */}
                                       <div className="p-5 border-t border-border bg-[#fafafa]">
                                         <div className="flex items-center justify-between">
                                           <div className="text-[12px] text-foreground/60">
-                                            {ESCALATION_TRIGGERS.length - disabledEscalation.size} of {ESCALATION_TRIGGERS.length} escalation triggers active
+                                            {ESCALATION_TRIGGERS.length - disabledEscalation.size} of {ESCALATION_TRIGGERS.length} situations require sign-off
                                           </div>
                                           <button
                                             onClick={() => setShowAdjustRules(false)}
